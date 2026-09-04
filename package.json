@@ -1,13 +1,15 @@
 {
   "name": "@kne/fastify-app-manager",
-  "version": "0.1.0",
-  "description": "",
+  "version": "0.1.1",
+  "description": "Fastify 单机应用市场插件：版本上传、PM2 托管、路径/域名反代与日志 SSE",
   "main": "index.js",
   "scripts": {
     "init": "husky",
     "build:md": "npx @kne/md-doc",
     "start:md": "npx @kne/md-doc --watch",
-    "prettier": "prettier --config .prettierrc --write '{libs/**/*,index}.{js,jsx,ts,tsx,json,css,scss}'",
+    "test": "mocha test/**/*.test.js",
+    "test:coverage": "nyc --reporter=html --reporter=text mocha test/**/*.test.js",
+    "prettier": "prettier --config .prettierrc --write '{libs/**/*,index,test/**/*}.{js,jsx,ts,tsx,json,css,scss}'",
     "lint-staged": "npx lint-staged"
   },
   "lint-staged": {
@@ -24,7 +26,17 @@
     "type": "git",
     "url": "git+https://github.com/kne-union/fastify-app-manager.git"
   },
-  "keywords": [],
+  "keywords": [
+    "fastify",
+    "pm2",
+    "app-manager",
+    "marketplace",
+    "reverse-proxy",
+    "gateway",
+    "sse",
+    "deployment",
+    "kne"
+  ],
   "author": "linzp",
   "license": "ISC",
   "bugs": {
@@ -38,12 +50,29 @@
   },
   "devDependencies": {
     "@fastify/env": "^5.0.2",
+    "@fastify/sensible": "^6.0.5",
+    "@kne/fastify-namespace": "^1.2.1",
     "@kne/fastify-sequelize": "^3.0.6",
+    "chai": "^6.2.2",
     "fastify": "^5.4.0",
     "fastify-plugin": "^5.0.1",
     "husky": "^9.0.11",
+    "mocha": "^12.0.0",
     "nodemon": "^3.1.3",
+    "nyc": "^18.0.0",
     "prettier": "^3.2.5",
+    "proxyquire": "^2.1.3",
     "sqlite3": "^5.1.7"
+  },
+  "dependencies": {
+    "@fastify/multipart": "^10.1.1",
+    "@fastify/reply-from": "^12.6.5",
+    "@kne/ensure-slash": "^0.1.0",
+    "adm-zip": "^0.6.0",
+    "fs-extra": "^11.4.0",
+    "jsdom": "^29.1.1",
+    "lodash": "^4.18.1",
+    "pm2": "^7.0.4",
+    "sequelize": "^6.37.7"
   }
 }
