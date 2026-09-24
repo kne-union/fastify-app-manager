@@ -52,7 +52,12 @@ module.exports = fp(async (fastify, options) => {
       fastify.log.warn({ err: e }, 'pm2 launchBus failed');
     }
 
-    await reconcile();
+    // 父应用重启后不阻塞 ready：后台按 PM2 真实状态异步对齐 DB
+    setImmediate(() => {
+      reconcile().catch(err => {
+        fastify.log.warn({ err }, 'async reconcile/sync statuses failed');
+      });
+    });
   };
 
   const fsEnsureAppsRoot = async () => {
@@ -61,26 +66,11 @@ module.exports = fp(async (fastify, options) => {
   };
 
   const reconcile = async () => {
-    const { models, services } = fastify[options.name];
-    const apps = await models.app.findAll({
-      where: { status: ['running', 'deploying'] }
-    });
-    let list = [];
-    try {
-      list = await pm2Util.list();
-    } catch (e) {
-      return;
+    const { services } = fastify[options.name];
+    if (typeof services.app.syncAllStatuses === 'function') {
+      return services.app.syncAllStatuses({ recoverIfMissing: true });
     }
-    const runningNames = new Set(list.filter(p => p.pm2_env?.status === 'online').map(p => p.name));
-    for (const app of apps) {
-      if (!runningNames.has(app.pm2Name)) {
-        try {
-          await services.app.start({ name: app.name });
-        } catch (e) {
-          await app.update({ status: 'error', message: `reconcile failed: ${e.message}` });
-        }
-      }
-    }
+    return [];
   };
 
   const onClose = async () => {

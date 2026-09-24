@@ -1,6 +1,5 @@
 const path = require('node:path');
 const fs = require('fs-extra');
-const { Sequelize } = require('sequelize');
 const { listSqlFiles } = require('./validatePackage');
 
 const SQL_MIGRATIONS_TABLE = '_fs_sql_migrations';
@@ -8,20 +7,21 @@ const SQL_MIGRATIONS_TABLE = '_fs_sql_migrations';
 /**
  * Run .sql files under server/{sqlPath} with the same tracking semantics as @kne/fastify-sequelize.
  */
-const runSqlMigrations = async ({ serverDir, sqlPath = 'sql', env = {} }) => {
+const runSqlMigrations = async ({ serverDir, sqlPath = 'sql', env = {}, Sequelize: SequelizeCtor } = {}) => {
   const sqlDir = path.join(serverDir, sqlPath);
   const files = await listSqlFiles(sqlDir);
   if (!files.length) {
     return { executed: [], skipped: true };
   }
 
-  const sequelize = createSequelizeFromEnv(env);
+  const sequelize = createSequelizeFromEnv(env, SequelizeCtor);
   try {
     await sequelize.authenticate();
+    // TIMESTAMP is portable across sqlite / postgres / mysql (avoid DATETIME — missing on PG)
     await sequelize.query(
       `CREATE TABLE IF NOT EXISTS ${SQL_MIGRATIONS_TABLE} (
         name VARCHAR(255) PRIMARY KEY,
-        executed_at DATETIME
+        executed_at TIMESTAMP
       )`
     );
 
@@ -46,7 +46,12 @@ const runSqlMigrations = async ({ serverDir, sqlPath = 'sql', env = {} }) => {
   }
 };
 
-const createSequelizeFromEnv = env => {
+const createSequelizeFromEnv = (env, SequelizeCtor) => {
+  let Sequelize = SequelizeCtor;
+  if (typeof Sequelize !== 'function') {
+    const mod = require('sequelize');
+    Sequelize = typeof mod === 'function' ? mod : mod.Sequelize;
+  }
   const dialect = env.DB_DIALECT || 'sqlite';
   if (dialect === 'sqlite') {
     return new Sequelize({

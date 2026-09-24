@@ -2,7 +2,19 @@ const { expect } = require('chai');
 const path = require('node:path');
 const fs = require('fs-extra');
 const os = require('node:os');
-const { mergeEnv, maskEnvForResponse, applyEnvPatch, SECRET_MASK } = require('../libs/utils/env');
+const {
+  mergeEnv,
+  maskEnvForResponse,
+  applyEnvPatch,
+  SECRET_MASK,
+  normalizeSecretKeys,
+  collectSecretKeys,
+  hasAppDbConfig,
+  buildDefaultAppDbEnv,
+  resolveAppDbEnv
+} = require('../libs/utils/env');
+const { assertDefaultAppDbSeparated, resolveDbScope, buildTablePrefix } = require('../libs/utils/dbIdentity');
+const { assertReadOnlyQuerySql } = require('../libs/utils/sqlQueryGuard');
 const { validatePackageRoot } = require('../libs/utils/validatePackage');
 const { isPathInside } = require('../libs/utils/zip');
 const { rewriteLocation, rewriteSetCookiePath, rewriteBody } = require('../libs/utils/pathRewrite');
@@ -32,6 +44,79 @@ describe('@kne/fastify-app-manager', function () {
       expect(next.API_KEY).to.equal('secret');
       expect(next.NAME).to.equal('b');
       expect(next.X).to.equal(undefined);
+    });
+
+    it('should treat explicit secretEnvKeys as secret even without pattern match', () => {
+      const opts = { secretEnvKeys: ['PLAIN_DB'], secretEnvKeyPattern: /(SECRET|PASSWORD|TOKEN|KEY|PRIVATE)/i };
+      const masked = maskEnvForResponse({ PLAIN_DB: 'pwd', NAME: 'a' }, opts);
+      expect(masked.PLAIN_DB).to.equal(SECRET_MASK);
+      expect(masked.NAME).to.equal('a');
+      const next = applyEnvPatch({ PLAIN_DB: 'pwd', NAME: 'a' }, { PLAIN_DB: SECRET_MASK, NAME: 'b' }, opts);
+      expect(next.PLAIN_DB).to.equal('pwd');
+      expect(next.NAME).to.equal('b');
+      expect(normalizeSecretKeys([' a ', 'a', '', null])).to.deep.equal(['a']);
+      expect(collectSecretKeys({ PLAIN_DB: 'x', API_KEY: 'y', NAME: 'z' }, opts)).to.deep.equal(['PLAIN_DB', 'API_KEY']);
+    });
+
+    it('should inject defaultAppDb when app has no DB config', () => {
+      expect(hasAppDbConfig({})).to.equal(false);
+      expect(hasAppDbConfig({ DB_DIALECT: 'sqlite', DB_STORAGE: '/tmp/a.db' })).to.equal(true);
+      const def = buildDefaultAppDbEnv({ dialect: 'sqlite', storage: '/tmp/shared.db' });
+      expect(def.DB_DIALECT).to.equal('sqlite');
+      expect(def.DB_STORAGE).to.equal('/tmp/shared.db');
+      const merged = mergeEnv({
+        appEnv: { FOO: '1' },
+        port: 4001,
+        defaultAppDb: { dialect: 'sqlite', storage: '/tmp/shared.db' }
+      });
+      expect(merged.DB_STORAGE).to.equal('/tmp/shared.db');
+      expect(merged.PORT).to.equal('4001');
+      const dedicated = resolveAppDbEnv({
+        appEnv: { DB_DIALECT: 'sqlite', DB_STORAGE: '/tmp/app.db' },
+        defaultAppDb: { dialect: 'sqlite', storage: '/tmp/shared.db' }
+      });
+      expect(dedicated.DB_STORAGE).to.equal('/tmp/app.db');
+      expect(resolveDbScope({ DB_DIALECT: 'sqlite', DB_STORAGE: '/tmp/app.db' })).to.equal('dedicated');
+      expect(resolveDbScope({})).to.equal('shared');
+    });
+
+    it('should inject DB_TABLE_PREFIX for shared apps by name', () => {
+      expect(buildTablePrefix('ai-talent-saas')).to.equal('t_ai_talent_saas_');
+      const shared = mergeEnv({
+        appEnv: { FOO: '1' },
+        port: 4001,
+        defaultAppDb: { dialect: 'sqlite', storage: '/tmp/shared.db' },
+        appName: 'ai-talent-saas'
+      });
+      expect(shared.DB_TABLE_PREFIX).to.equal('t_ai_talent_saas_');
+      const custom = mergeEnv({
+        appEnv: { DB_TABLE_PREFIX: 't_custom_' },
+        port: 4001,
+        appName: 'ai-talent-saas'
+      });
+      expect(custom.DB_TABLE_PREFIX).to.equal('t_custom_');
+      const dedicated = mergeEnv({
+        appEnv: { DB_DIALECT: 'sqlite', DB_STORAGE: '/tmp/app.db' },
+        port: 4001,
+        appName: 'ai-talent-saas'
+      });
+      expect(dedicated.DB_TABLE_PREFIX).to.equal(undefined);
+    });
+
+    it('should reject defaultAppDb same as host sqlite', () => {
+      const storage = '/tmp/same-host.db';
+      expect(() =>
+        assertDefaultAppDbSeparated({ dialect: 'sqlite', storage }, { options: { dialect: 'sqlite', storage } })
+      ).to.throw(/separated/);
+    });
+  });
+
+  describe('sqlQueryGuard', () => {
+    it('should allow select and reject writes', () => {
+      expect(assertReadOnlyQuerySql('SELECT * FROM t_foo').tables).to.include('t_foo');
+      expect(() => assertReadOnlyQuerySql('UPDATE t_foo SET a=1')).to.throw(/read-only|not allowed/i);
+      expect(() => assertReadOnlyQuerySql('SELECT 1; SELECT 2')).to.throw(/multiple/);
+      expect(() => assertReadOnlyQuerySql('DELETE FROM t_foo')).to.throw();
     });
   });
 

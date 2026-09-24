@@ -114,11 +114,37 @@ describe('plugin integration', function () {
     });
     expect(envSaved.json().env.NAME).to.equal('b');
 
+    const markSecret = await fastify.inject({
+      method: 'POST',
+      url: '/api/v1/app-manager/app/save-env',
+      payload: {
+        name: 'demo',
+        env: { PLAIN_DB: 's3cret' },
+        secretEnvKeys: ['PLAIN_DB']
+      }
+    });
+    expect(markSecret.json().env.PLAIN_DB).to.equal('********');
+    expect(markSecret.json().secretEnvKeys).to.include('PLAIN_DB');
+    expect(markSecret.json().secretEnvKeys).to.include('API_KEY');
+
+    const keepSecret = await fastify.inject({
+      method: 'POST',
+      url: '/api/v1/app-manager/app/save-env',
+      payload: {
+        name: 'demo',
+        env: { PLAIN_DB: '********', NAME: 'c' },
+        secretEnvKeys: ['PLAIN_DB']
+      }
+    });
+    expect(keepSecret.json().env.NAME).to.equal('c');
+    expect(keepSecret.json().env.PLAIN_DB).to.equal('********');
+
     const detail = await fastify.inject({
       method: 'GET',
       url: '/api/v1/app-manager/app/detail?name=demo'
     });
     expect(detail.json().name).to.equal('demo');
+    expect(detail.json().secretEnvKeys).to.include('PLAIN_DB');
   });
 
   it('should upload version deploy lifecycle and read logs', async () => {
@@ -234,9 +260,139 @@ describe('plugin integration', function () {
     const removed = await fastify.inject({
       method: 'POST',
       url: '/api/v1/app-manager/app/remove',
-      payload: { name: 'biz' }
+      payload: { name: 'biz', cleanupData: false, exportBeforeRemove: false }
     });
     expect(removed.statusCode).to.equal(200);
+  });
+
+  it('should manage owned tables rows query export and cleanup', async () => {
+    const { createSequelizeFromEnv } = require('../libs/utils/migrate');
+    await fastify.inject({
+      method: 'POST',
+      url: '/api/v1/app-manager/app/create',
+      payload: { name: 'dataapp', label: 'Data' }
+    });
+    const detail = await fastify.inject({
+      method: 'GET',
+      url: '/api/v1/app-manager/app/detail?name=dataapp'
+    });
+    const app = detail.json();
+    const env = fastify.appManager.services.dbops.resolveEnvForApp(app);
+    expect(env.DB_DIALECT).to.equal('sqlite');
+    expect(env.DB_STORAGE).to.include('_shared');
+
+    const sequelize = createSequelizeFromEnv(env);
+    await sequelize.query(
+      'CREATE TABLE t_demo (id TEXT PRIMARY KEY, name TEXT, deleted_at DATETIME)'
+    );
+    await sequelize.query(`INSERT INTO t_demo (id, name) VALUES ('1', 'alpha')`);
+    await sequelize.close();
+
+    await fastify.inject({
+      method: 'POST',
+      url: '/api/v1/app-manager/app/db/tables/register',
+      payload: { name: 'dataapp', tables: ['t_demo'] }
+    });
+
+    const tables = await fastify.inject({
+      method: 'GET',
+      url: '/api/v1/app-manager/app/db/tables?name=dataapp'
+    });
+    expect(tables.json().pageData.map(t => t.table)).to.include('t_demo');
+
+    const rows = await fastify.inject({
+      method: 'GET',
+      url: '/api/v1/app-manager/app/db/rows?name=dataapp&table=t_demo'
+    });
+    expect(rows.json().totalCount).to.equal(1);
+
+    const saved = await fastify.inject({
+      method: 'POST',
+      url: '/api/v1/app-manager/app/db/row/save',
+      payload: { name: 'dataapp', table: 't_demo', data: { id: '2', name: 'beta' } }
+    });
+    expect(saved.json().action).to.equal('insert');
+
+    const autoSaved = await fastify.inject({
+      method: 'POST',
+      url: '/api/v1/app-manager/app/db/row/save',
+      payload: {
+        name: 'dataapp',
+        table: 't_demo',
+        data: { name: 'gamma' },
+        autoGenerate: { id: true }
+      }
+    });
+    expect(autoSaved.json().action).to.equal('insert');
+    expect(autoSaved.json().data.id).to.be.a('string').and.not.empty;
+
+    const autoDefault = await fastify.inject({
+      method: 'POST',
+      url: '/api/v1/app-manager/app/db/row/save',
+      payload: {
+        name: 'dataapp',
+        table: 't_demo',
+        data: { name: 'delta' }
+      }
+    });
+    expect(autoDefault.json().action).to.equal('insert');
+    expect(autoDefault.json().data.id).to.be.a('string').and.not.empty;
+
+    const softRemoved = await fastify.inject({
+      method: 'POST',
+      url: '/api/v1/app-manager/app/db/row/remove',
+      payload: { name: 'dataapp', table: 't_demo', pk: { id: '2' } }
+    });
+    expect(softRemoved.json().mode).to.equal('soft');
+
+    const rowsAfterSoft = await fastify.inject({
+      method: 'GET',
+      url: '/api/v1/app-manager/app/db/rows?name=dataapp&table=t_demo'
+    });
+    expect(rowsAfterSoft.json().totalCount).to.equal(3);
+
+    const rowsIncludeDeleted = await fastify.inject({
+      method: 'GET',
+      url: '/api/v1/app-manager/app/db/rows?name=dataapp&table=t_demo&includeDeleted=true'
+    });
+    expect(rowsIncludeDeleted.json().totalCount).to.equal(4);
+
+    const queried = await fastify.inject({
+      method: 'POST',
+      url: '/api/v1/app-manager/app/db/query',
+      payload: { name: 'dataapp', sql: 'SELECT name FROM t_demo WHERE deleted_at IS NULL ORDER BY id' }
+    });
+    expect(queried.json().rowCount).to.equal(3);
+
+    const denied = await fastify.inject({
+      method: 'POST',
+      url: '/api/v1/app-manager/app/db/query',
+      payload: { name: 'dataapp', sql: 'UPDATE t_demo SET name = \'x\'' }
+    });
+    expect(denied.statusCode).to.be.at.least(400);
+
+    const exported = await fastify.inject({
+      method: 'POST',
+      url: '/api/v1/app-manager/app/db/export',
+      payload: { name: 'dataapp' }
+    });
+    expect(exported.json().path).to.include('exports');
+    expect(await fs.pathExists(exported.json().path)).to.equal(true);
+
+    const cleaned = await fastify.inject({
+      method: 'POST',
+      url: '/api/v1/app-manager/app/db/cleanup',
+      payload: { name: 'dataapp' }
+    });
+    expect(cleaned.json().dropped).to.include('t_demo');
+    expect(cleaned.json().manualRequired).to.equal(false);
+
+    const removed = await fastify.inject({
+      method: 'POST',
+      url: '/api/v1/app-manager/app/remove',
+      payload: { name: 'dataapp', exportBeforeRemove: false, cleanupData: false }
+    });
+    expect(removed.json().removed).to.equal(true);
   });
 
   it('should stream logs over sse and emit bus logs', async () => {

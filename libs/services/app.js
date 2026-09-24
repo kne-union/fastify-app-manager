@@ -2,7 +2,7 @@ const fp = require('fastify-plugin');
 const path = require('node:path');
 const fs = require('fs-extra');
 const portPool = require('../utils/portPool');
-const { mergeEnv, maskEnvForResponse, applyEnvPatch, mergePm2Config } = require('../utils/env');
+const { mergeEnv, maskEnvForResponse, applyEnvPatch, mergePm2Config, normalizeSecretKeys, collectSecretKeys } = require('../utils/env');
 const { prepareVersionArtifact } = require('../utils/version');
 const { injectEntryHtml } = require('../utils/entryInject');
 const { ensureLogFiles, readLogTail, readLastLines, appendLog } = require('../utils/logFiles');
@@ -29,13 +29,18 @@ module.exports = fp(async (fastify, options) => {
   const appRoot = name => path.join(options.appsRoot, name);
   const mountPrefix = name => `${options.pathPrefix.replace(/\/$/, '')}/${name}`;
 
+  const resolveSecretEnvKeys = appLike => normalizeSecretKeys(appLike?.options?.secretEnvKeys);
+
   const toPublicApp = app => {
     if (!app) {
       return null;
     }
     const json = typeof app.toJSON === 'function' ? app.toJSON() : { ...app };
-    json.env = maskEnvForResponse(json.env || {}, options);
+    const explicitSecrets = resolveSecretEnvKeys(json);
+    const envOpts = Object.assign({}, options, { secretEnvKeys: explicitSecrets });
+    json.env = maskEnvForResponse(json.env || {}, envOpts);
     json.passthroughEnvKeys = options.passthroughEnvKeys || [];
+    json.secretEnvKeys = collectSecretKeys(json.env || {}, envOpts);
     json.pathUrl = `${mountPrefix(json.name)}/`;
     return json;
   };
@@ -79,6 +84,11 @@ module.exports = fp(async (fastify, options) => {
       portMax: options.portMax
     });
 
+    const normalizedOptions = Object.assign({}, appOptions || {});
+    if (normalizedOptions.secretEnvKeys !== undefined) {
+      normalizedOptions.secretEnvKeys = normalizeSecretKeys(normalizedOptions.secretEnvKeys);
+    }
+
     const app = await models.app.create({
       name,
       label,
@@ -87,7 +97,7 @@ module.exports = fp(async (fastify, options) => {
       description: description || null,
       env: env || {},
       pm2Config: pm2Config || {},
-      options: appOptions || {},
+      options: normalizedOptions,
       port,
       status: 'idle',
       rootPath,
@@ -114,16 +124,29 @@ module.exports = fp(async (fastify, options) => {
       }
     }
     if (patch.env) {
-      patch.env = applyEnvPatch(app.env || {}, patch.env, options);
+      const secretEnvKeys = resolveSecretEnvKeys(app);
+      patch.env = applyEnvPatch(app.env || {}, patch.env, Object.assign({}, options, { secretEnvKeys }));
+    }
+    if (patch.options && patch.options.secretEnvKeys !== undefined) {
+      patch.options = Object.assign({}, patch.options, {
+        secretEnvKeys: normalizeSecretKeys(patch.options.secretEnvKeys)
+      });
     }
     await app.update(patch);
     return toPublicApp(app);
   };
 
-  const saveEnv = async ({ name, env }) => {
+  const saveEnv = async ({ name, env, secretEnvKeys: nextSecretKeys } = {}) => {
     const app = await getByName(name);
-    const next = applyEnvPatch(app.env || {}, env || {}, options);
-    await app.update({ env: next });
+    const currentSecrets = resolveSecretEnvKeys(app);
+    const secretEnvKeys = nextSecretKeys !== undefined ? normalizeSecretKeys(nextSecretKeys) : currentSecrets;
+    const nextEnv = applyEnvPatch(app.env || {}, env || {}, Object.assign({}, options, { secretEnvKeys }));
+    const cleanedSecrets = secretEnvKeys.filter(key => Object.prototype.hasOwnProperty.call(nextEnv, key));
+    await app.update({
+      env: nextEnv,
+      options: Object.assign({}, app.options || {}, { secretEnvKeys: cleanedSecrets })
+    });
+    await app.reload();
     return toPublicApp(app);
   };
 
@@ -235,6 +258,139 @@ module.exports = fp(async (fastify, options) => {
     return false;
   };
 
+  const getPm2ProcessStatus = async pm2Name => {
+    try {
+      const list = await pm2Util.describe(pm2Name);
+      const proc = list?.[0];
+      return proc?.pm2_env?.status || null;
+    } catch (e) {
+      return null;
+    }
+  };
+
+  /** 同一 app 并发同步合并为一次，避免 restart/reconcile 竞态 */
+  const statusSyncInflight = new Map();
+
+  /**
+   * 根据 PM2 真实进程状态 + HTTP 健康检查，异步写回 DB status。
+   * @param {string|number} appId
+   * @param {{ recoverIfMissing?: boolean }} [opts] recoverIfMissing：DB 期望在跑但进程不在时尝试 startProcess
+   */
+  const syncRealStatus = async (appId, { recoverIfMissing = false, beforeTables } = {}) => {
+    const key = String(appId);
+    if (statusSyncInflight.has(key)) {
+      return statusSyncInflight.get(key);
+    }
+    const run = (async () => {
+      const app = await models.app.findByPk(appId);
+      if (!app) {
+        return null;
+      }
+      try {
+        let pm2Status = await getPm2ProcessStatus(app.pm2Name);
+
+        if ((!pm2Status || pm2Status === 'stopped' || pm2Status === 'stopping') && recoverIfMissing && app.currentVersionId) {
+          try {
+            await startProcess(app);
+            pm2Status = (await getPm2ProcessStatus(app.pm2Name)) || 'online';
+          } catch (e) {
+            await app.update({ status: 'error', message: e.message });
+            return toPublicApp(app);
+          }
+        }
+
+        if (!pm2Status || pm2Status === 'stopped' || pm2Status === 'stopping') {
+          if (app.status !== 'stopped' && app.status !== 'idle') {
+            await app.update({ status: 'stopped', message: null });
+          }
+          return toPublicApp(await models.app.findByPk(appId));
+        }
+
+        if (pm2Status === 'errored') {
+          await app.update({ status: 'error', message: 'pm2 process errored' });
+          return toPublicApp(await models.app.findByPk(appId));
+        }
+
+        // online / launching / waiting 等：探测 HTTP 就绪
+        const ok = await healthCheck(app.port, {
+          timeoutMs: options.healthCheckTimeoutMs,
+          intervalMs: options.healthCheckIntervalMs,
+          healthPath: options.healthCheckPath
+        });
+        if (ok) {
+          await app.update({ status: 'running', message: null });
+          try {
+            const fresh = await models.app.findByPk(appId);
+            const dbops = fastify[options.name].services.dbops;
+            await dbops.claimOwnedTablesByPrefix(fresh);
+            if (Array.isArray(beforeTables)) {
+              const afterTables = await dbops.withSequelize(fresh, sequelize => dbops.listAllTables(sequelize));
+              await fresh.reload();
+              await dbops.mergeOwnedTablesFromDiff(fresh, beforeTables, afterTables);
+            }
+          } catch (e) {
+            fastify.log.warn({ err: e, appId }, 'claim owned tables after ready failed');
+          }
+        } else {
+          const again = await getPm2ProcessStatus(app.pm2Name);
+          if (again === 'errored') {
+            await app.update({ status: 'error', message: 'pm2 process errored' });
+          } else if (again === 'online' || again === 'launching') {
+            await app.update({ status: 'error', message: 'health check timeout' });
+          } else {
+            await app.update({ status: 'stopped', message: 'process not online after health check' });
+          }
+        }
+        return toPublicApp(await models.app.findByPk(appId));
+      } catch (e) {
+        await app.update({ status: 'error', message: e.message });
+        return toPublicApp(await models.app.findByPk(appId));
+      }
+    })().finally(() => {
+      statusSyncInflight.delete(key);
+    });
+    statusSyncInflight.set(key, run);
+    return run;
+  };
+
+  const snapshotTablesSafe = async app => {
+    try {
+      const dbops = fastify[options.name].services.dbops;
+      return await dbops.withSequelize(app, sequelize => dbops.listAllTables(sequelize));
+    } catch (e) {
+      return [];
+    }
+  };
+
+  const finishDeployAsync = async appId => syncRealStatus(appId, { recoverIfMissing: false });
+
+  const scheduleStatusSync = (appId, opts) => {
+    setImmediate(() => {
+      syncRealStatus(appId, opts).catch(err => {
+        fastify.log.warn({ err, appId }, 'syncRealStatus failed');
+      });
+    });
+  };
+
+  const syncStatus = async ({ name, recoverIfMissing = false } = {}) => {
+    const app = await getByName(name);
+    return syncRealStatus(app.id, { recoverIfMissing });
+  };
+
+  const syncAllStatuses = async ({ recoverIfMissing = true } = {}) => {
+    const apps = await models.app.findAll({
+      where: {
+        status: ['running', 'deploying', 'stopped', 'error']
+      }
+    });
+    const results = [];
+    for (const app of apps) {
+      const shouldRecover = recoverIfMissing && (app.status === 'running' || app.status === 'deploying');
+      results.push(await syncRealStatus(app.id, { recoverIfMissing: shouldRecover }));
+    }
+    return results.filter(Boolean);
+  };
+
   const startProcess = async app => {
     const version = await models.appVersion.findByPk(app.currentVersionId);
     if (!version) {
@@ -245,8 +401,18 @@ module.exports = fp(async (fastify, options) => {
     const env = mergeEnv({
       passthroughEnvKeys: options.passthroughEnvKeys,
       appEnv: app.env,
-      port: app.port
+      port: app.port,
+      defaultAppDb: options.defaultAppDb,
+      appName: app.name
     });
+
+    // Persist injected shared-DB table prefix so claim/UI see the same value
+    if (env.DB_TABLE_PREFIX && app.env?.DB_TABLE_PREFIX !== env.DB_TABLE_PREFIX) {
+      await app.update({
+        env: Object.assign({}, app.env || {}, { DB_TABLE_PREFIX: env.DB_TABLE_PREFIX })
+      });
+      await app.reload();
+    }
 
     const pathBase = mountPrefix(app.name);
     // Domain-first: inject `/` so custom Host SPA works; path mode then relies on gateway rewrite fallback.
@@ -268,27 +434,6 @@ module.exports = fp(async (fastify, options) => {
       outFile,
       errorFile: errFile
     });
-  };
-
-  const finishDeployAsync = async appId => {
-    const app = await models.app.findByPk(appId);
-    if (!app) {
-      return;
-    }
-    try {
-      const ok = await healthCheck(app.port, {
-        timeoutMs: options.healthCheckTimeoutMs,
-        intervalMs: options.healthCheckIntervalMs,
-        healthPath: options.healthCheckPath
-      });
-      if (ok) {
-        await app.update({ status: 'running', message: null });
-      } else {
-        await app.update({ status: 'error', message: 'health check timeout' });
-      }
-    } catch (e) {
-      await app.update({ status: 'error', message: e.message });
-    }
   };
 
   const deploy = async ({ name, versionId, version, runMigration = true }) => {
@@ -321,13 +466,30 @@ module.exports = fp(async (fastify, options) => {
         const env = mergeEnv({
           passthroughEnvKeys: options.passthroughEnvKeys,
           appEnv: app.env,
-          port: app.port
+          port: app.port,
+          defaultAppDb: options.defaultAppDb,
+          appName: app.name
         });
+        const dbops = fastify[options.name].services.dbops;
+        let beforeTables = [];
+        try {
+          beforeTables = await dbops.withSequelize(app, async sequelize => dbops.listAllTables(sequelize));
+        } catch (e) {
+          beforeTables = [];
+        }
         await runSqlMigrations({
           serverDir: path.join(ver.artifactPath, 'server'),
           sqlPath: ver.migrationPath || options.sqlPath,
-          env
+          env,
+          Sequelize: fastify.sequelize.Sequelize
         });
+        try {
+          const afterTables = await dbops.withSequelize(app, async sequelize => dbops.listAllTables(sequelize));
+          await app.reload();
+          await dbops.mergeOwnedTablesFromDiff(app, beforeTables, afterTables);
+        } catch (e) {
+          // ignore ownership merge failures
+        }
       }
 
       if (runMigration === false) {
@@ -335,8 +497,9 @@ module.exports = fp(async (fastify, options) => {
         app.env = Object.assign({}, app.env, { RUN_SQL_ON_SYNC: 'false' });
       }
 
+      const beforeForReady = await snapshotTablesSafe(app);
       await startProcess(app);
-      setImmediate(() => finishDeployAsync(app.id));
+      scheduleStatusSync(app.id, { beforeTables: beforeForReady });
       return {
         name: app.name,
         status: 'deploying',
@@ -369,8 +532,9 @@ module.exports = fp(async (fastify, options) => {
     }
     await app.update({ status: 'deploying', message: null });
     try {
+      const beforeTables = await snapshotTablesSafe(app);
       await startProcess(app);
-      setImmediate(() => finishDeployAsync(app.id));
+      scheduleStatusSync(app.id, { beforeTables });
       return toPublicApp(await getByName(name));
     } catch (e) {
       await app.update({ status: 'error', message: e.message });
@@ -382,38 +546,64 @@ module.exports = fp(async (fastify, options) => {
     const app = await getByName(name);
     await app.update({ status: 'deploying', message: null });
     try {
-      await pm2Util.restartApp(app.pm2Name);
-      setImmediate(() => finishDeployAsync(app.id));
+      const beforeTables = await snapshotTablesSafe(app);
+      // Always startProcess so env (incl. DB_TABLE_PREFIX) is refreshed; pm2.restart keeps stale env
+      try {
+        await pm2Util.stopApp(app.pm2Name);
+      } catch (e) {
+        // ignore if not running
+      }
+      await startProcess(app);
+      scheduleStatusSync(app.id, { beforeTables });
       return toPublicApp(await getByName(name));
     } catch (e) {
-      try {
-        await startProcess(app);
-        setImmediate(() => finishDeployAsync(app.id));
-        return toPublicApp(await getByName(name));
-      } catch (e2) {
-        await app.update({ status: 'error', message: e2.message });
-        httpError(400, e2.message);
-      }
+      await app.update({ status: 'error', message: e.message });
+      httpError(400, e.message);
     }
   };
 
-  const remove = async ({ name }) => {
+  const remove = async ({ name, exportBeforeRemove = true, cleanupData = true, allowRemoveIfCleanupIncomplete = false, force = false, removeSqliteFile = false } = {}) => {
     const app = await getByName(name);
     try {
       await pm2Util.deleteProcess(app.pm2Name);
     } catch (e) {
       // ignore
     }
+
+    const dbops = fastify[options.name].services.dbops;
+    let exportResult = null;
+    let cleanupResult = null;
+
+    if (exportBeforeRemove && !force) {
+      exportResult = await dbops.exportData({ name });
+    }
+
+    if (cleanupData) {
+      cleanupResult = await dbops.cleanup({ name, removeSqliteFile });
+      if (cleanupResult.manualRequired && !allowRemoveIfCleanupIncomplete) {
+        return {
+          removed: false,
+          reason: 'cleanup incomplete; execute returned sql or pass allowRemoveIfCleanupIncomplete=true',
+          export: exportResult,
+          cleanup: cleanupResult
+        };
+      }
+    }
+
     await models.appVersion.destroy({ where: { appName: name } });
     await fs.remove(app.rootPath).catch(() => {});
     await app.destroy();
-    return {};
+    return {
+      removed: true,
+      export: exportResult,
+      cleanup: cleanupResult
+    };
   };
 
-  const logs = async ({ name, stream = 'out', perPage = 100, currentPage = 1 }) => {
+  const logs = async ({ name, stream = 'out', perPage = 100, currentPage = 1, beforeLine } = {}) => {
     const app = await getByName(name);
     const file = path.join(app.rootPath, 'logs', stream === 'err' ? 'err.log' : 'out.log');
-    return readLogTail(file, { perPage, currentPage });
+    return readLogTail(file, { perPage, currentPage, beforeLine });
   };
 
   const findByHost = async host => {
@@ -441,6 +631,8 @@ module.exports = fp(async (fastify, options) => {
       start,
       stop,
       restart,
+      syncStatus,
+      syncAllStatuses,
       remove,
       logs,
       toPublicApp,
@@ -462,7 +654,14 @@ module.exports = fp(async (fastify, options) => {
         await appendLog(file, content);
         const hub = getLogHub();
         if (hub) {
-          hub.emit(`log:${appName}`, { appName, stream, content, loggedAt: new Date().toISOString() });
+          const { totalCount } = await readLogTail(file, { perPage: 1, currentPage: 1 });
+          hub.emit(`log:${appName}`, {
+            appName,
+            stream,
+            content,
+            line: totalCount,
+            loggedAt: new Date().toISOString()
+          });
         }
       }
     }
