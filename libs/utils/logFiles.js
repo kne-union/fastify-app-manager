@@ -22,20 +22,34 @@ const appendLog = async (filePath, content) => {
   await fs.appendFile(filePath, content.endsWith('\n') ? content : `${content}\n`);
 };
 
-const readLogTail = async (filePath, { perPage = 100, currentPage = 1 } = {}) => {
+const readLogTail = async (filePath, { perPage = 100, currentPage = 1, beforeLine } = {}) => {
+  const size = Math.min(100, Math.max(1, Number(perPage) || 100));
+  const page = Math.max(1, Number(currentPage) || 1);
   if (!(await fs.pathExists(filePath))) {
-    return { pageData: [], totalCount: 0 };
+    return { pageData: [], totalCount: 0, hasMore: false };
   }
   const text = await fs.readFile(filePath, 'utf8');
   const lines = text.split(/\r?\n/).filter((line, idx, arr) => !(idx === arr.length - 1 && line === ''));
   const totalCount = lines.length;
-  const start = Math.max(0, totalCount - perPage * currentPage);
-  const end = Math.max(0, totalCount - perPage * (currentPage - 1));
+  let start;
+  let end;
+  if (beforeLine != null && beforeLine !== '' && Number(beforeLine) > 0) {
+    // 取 line < beforeLine 的尾部 size 行（0-based slice end = beforeLine-1）
+    end = Math.min(Math.max(0, Number(beforeLine) - 1), totalCount);
+    start = Math.max(0, end - size);
+  } else {
+    start = Math.max(0, totalCount - size * page);
+    end = Math.max(0, totalCount - size * (page - 1));
+  }
   const pageData = lines.slice(start, end).map((content, i) => ({
     line: start + i + 1,
     content
   }));
-  return { pageData: pageData.reverse(), totalCount };
+  return {
+    pageData: pageData.reverse(),
+    totalCount,
+    hasMore: start > 0
+  };
 };
 
 const readLastLines = async (filePath, n = 100) => {

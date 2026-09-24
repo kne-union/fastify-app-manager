@@ -55,6 +55,27 @@ describe('uncovered utils', function () {
       const missing = await readLogTail(path.join(root, 'logs', 'missing.log'));
       expect(missing.totalCount).to.equal(0);
     });
+
+    it('should page with beforeLine and cap perPage at 100', async () => {
+      const { outFile } = await ensureLogFiles(root);
+      for (let i = 1; i <= 250; i += 1) {
+        await appendLog(outFile, `L${i}`);
+      }
+      const capped = await readLogTail(outFile, { perPage: 999, currentPage: 1 });
+      expect(capped.pageData).to.have.length(100);
+      expect(capped.pageData[0].content).to.equal('L250');
+      expect(capped.hasMore).to.equal(true);
+
+      const older = await readLogTail(outFile, { perPage: 100, beforeLine: 151 });
+      expect(older.pageData).to.have.length(100);
+      expect(older.pageData[0].content).to.equal('L150');
+      expect(older.pageData[99].content).to.equal('L51');
+      expect(older.hasMore).to.equal(true);
+
+      const earliest = await readLogTail(outFile, { perPage: 100, beforeLine: 51 });
+      expect(earliest.pageData[earliest.pageData.length - 1].content).to.equal('L1');
+      expect(earliest.hasMore).to.equal(false);
+    });
   });
 
   describe('logStream', () => {

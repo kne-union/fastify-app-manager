@@ -1,15 +1,18 @@
 const fp = require('fastify-plugin');
 const path = require('node:path');
+const fs = require('fs-extra');
+const { assertDefaultAppDbSeparated } = require('./libs/utils/dbIdentity');
 
 module.exports = fp(
   async (fastify, options) => {
+    const appsRoot = options.appsRoot || path.join(process.cwd(), 'managed-apps');
     options = Object.assign(
       {},
       {
         dbTableNamePrefix: 't_app_manager_',
         name: 'appManager',
         prefix: '/api/v1/app-manager',
-        appsRoot: path.join(process.cwd(), 'managed-apps'),
+        appsRoot,
         portMin: 4000,
         portMax: 7999,
         pathPrefix: '/app',
@@ -27,6 +30,15 @@ module.exports = fp(
         secretEnvKeyPattern: /(SECRET|PASSWORD|TOKEN|KEY|PRIVATE)/i,
         sqlPath: 'sql',
         migrateBeforeStart: false,
+        defaultAppDb: {
+          dialect: 'sqlite',
+          storage: path.join(appsRoot, '_shared', 'apps-data.sqlite'),
+          logging: false
+        },
+        dbQueryMaxRows: 500,
+        dbQueryTimeoutMs: 15000,
+        /** 宿主 fastify-sequelize 命名连接，用于默认托管库（推荐，复用宿主 pg 等驱动） */
+        defaultAppDbConnection: null,
         pm2Defaults: {
           exec_mode: 'fork',
           instances: 1,
@@ -46,6 +58,22 @@ module.exports = fp(
       },
       options
     );
+
+    if (!options.defaultAppDb) {
+      options.defaultAppDb = {
+        dialect: 'sqlite',
+        storage: path.join(options.appsRoot, '_shared', 'apps-data.sqlite'),
+        logging: false
+      };
+    }
+
+    if (fastify.sequelize?.instance) {
+      assertDefaultAppDbSeparated(options.defaultAppDb, fastify.sequelize.instance);
+    }
+
+    if (options.defaultAppDb?.dialect === 'sqlite' && options.defaultAppDb.storage) {
+      await fs.ensureDir(path.dirname(options.defaultAppDb.storage));
+    }
 
     await fastify.register(require('@fastify/multipart'), {
       limits: {

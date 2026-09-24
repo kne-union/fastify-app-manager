@@ -30,7 +30,7 @@ Client / Admin UI
 | Domain gateway | Host 精确匹配且状态为 `running` 时透明反代，不改写路径 |
 | Path gateway | `/app/{name}` 剥前缀；改写绝对路径 Location、Cookie Path、文本类 body |
 | PM2 | 每应用一进程，名 `app-manager__{name}`；stdout/stderr 落 `appsRoot/{name}/logs` |
-| Bootstrap | `onReady` 连接 PM2、挂 log bus、对 `running`/`deploying` 做 reconcile |
+| Bootstrap | `onReady` 连接 PM2、挂 log bus；**异步**对托管应用做 `syncAllStatuses`（不阻塞父应用 ready） |
 
 #### 部署时序
 
@@ -80,9 +80,14 @@ deploy(versionId)
 | 来源 | 优先级与规则 |
 |------|----------------|
 | 宿主 `passthroughEnvKeys` | 仅注入白名单键的当前值；API **不回传**宿主值，只暴露键名列表 |
-| 应用 `env` | 覆盖透传键；响应中匹配 `secretEnvKeyPattern` 的键显示为 `********` |
+| 应用 `env` | 覆盖透传键；响应中匹配 `secretEnvKeyPattern` **或**显式 `secretEnvKeys` 的键显示为 `********` |
 | `PORT` | 始终强制为分配端口，不可被 app.env 覆盖 |
 | `save-env` patch | `null` 删除键；`********` 对 secret 键表示保持原值 |
+| 显式密钥 | 存于 `options.secretEnvKeys`；`save-env` 可传 `secretEnvKeys` 将普通键标为密钥；响应顶层回传合并后的键名列表（不含明文） |
+| 默认托管库 | `defaultAppDb`（默认 `appsRoot/_shared/apps-data.sqlite`），与宿主主库强制分离；应用未配 `DB_*` 时注入 |
+| 应用自有库 | 应用 `env` 含完整 `DB_*` 时为独享库（`dbScope=dedicated`） |
+| 共享库表前缀 | 启动时注入 `DB_TABLE_PREFIX=t_{appName}_`（应用可显式覆盖）；子应用 sequelize 须读取该变量建表 |
+| 表归属 | `options.ownedTables`；共享库启动就绪后按前缀自动认领，亦可 `sync-owned` 扫描；运维仅限归属表 |
 
 #### SQL 迁移
 
@@ -93,11 +98,12 @@ deploy(versionId)
 | 特性 | 说明 |
 |------|------|
 | 版本上传 | Zip Slip 防护、条目数/体积上限、Fullstack 包格式校验、server 生产依赖安装 |
-| 短部署 | `deploy` 立即返回 `deploying`，后台健康检查切 `running`/`error`；可用 SSE 看日志 |
-| 生命周期 | `start` / `stop` / `restart` / `remove`；启动时 reconcile 丢失的 PM2 进程 |
+| 短部署 | `deploy` / `start` / `restart` 立即返回 `deploying`，后台按 PM2 真实状态 + healthCheck 写回 `running`/`error`/`stopped` |
+| 生命周期 | `start` / `stop` / `restart` / `remove`；父应用重启后异步 `syncAllStatuses` 对齐 PM2 |
 | 双通道访问 | 自定义域名透明反代 + `/app/{name}` 剥前缀反代 |
-| 日志 | 文件落盘 + 历史分页 + SSE（含回放行与心跳） |
+| 日志 | 文件落盘 + 历史分页（`beforeLine` 上滚、每页最多 100 行）+ SSE（含回放行与心跳） |
 | 鉴权 | `createAuthenticate` 可注入；默认尝试 `fastify.account.authenticate.admin` |
+| 数据运维 | 归属表浏览、行 CRUD、只读 query SQL、导出 zip、cleanup（无权限返回 SQL） |
 
 ### 使用方法
 

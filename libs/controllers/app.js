@@ -66,7 +66,8 @@ module.exports = fp(async (fastify, options) => {
           required: ['name', 'env'],
           properties: {
             name: { type: 'string' },
-            env: { type: 'object' }
+            env: { type: 'object' },
+            secretEnvKeys: { type: 'array', items: { type: 'string' } }
           }
         }
       }
@@ -183,7 +184,7 @@ module.exports = fp(async (fastify, options) => {
     async request => services.app.detail(request.query)
   );
 
-  for (const action of ['start', 'stop', 'restart', 'remove']) {
+  for (const action of ['start', 'stop', 'restart']) {
     fastify.post(
       `${options.prefix}/app/${action}`,
       {
@@ -201,6 +202,29 @@ module.exports = fp(async (fastify, options) => {
     );
   }
 
+  fastify.post(
+    `${options.prefix}/app/remove`,
+    {
+      onRequest: auth(),
+      schema: {
+        summary: '删除应用（默认可先导出并清理所属表）',
+        body: {
+          type: 'object',
+          required: ['name'],
+          properties: {
+            name: { type: 'string' },
+            exportBeforeRemove: { type: 'boolean', default: true },
+            cleanupData: { type: 'boolean', default: true },
+            allowRemoveIfCleanupIncomplete: { type: 'boolean', default: false },
+            force: { type: 'boolean', default: false },
+            removeSqliteFile: { type: 'boolean', default: false }
+          }
+        }
+      }
+    },
+    async request => services.app.remove(request.body)
+  );
+
   fastify.get(
     `${options.prefix}/app/logs`,
     {
@@ -213,8 +237,12 @@ module.exports = fp(async (fastify, options) => {
           properties: {
             name: { type: 'string' },
             stream: { type: 'string', enum: ['out', 'err'], default: 'out' },
-            perPage: { type: 'number', default: 100 },
-            currentPage: { type: 'number', default: 1 }
+            perPage: { type: 'number', default: 100, maximum: 100 },
+            currentPage: { type: 'number', default: 1 },
+            beforeLine: {
+              type: 'number',
+              description: 'Load up to perPage lines with line number < beforeLine (for scroll-up history)'
+            }
           }
         }
       }

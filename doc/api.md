@@ -10,7 +10,9 @@
 | `portMax` | number | 否 | `7999` | 端口池上限（含） |
 | `pathPrefix` | string | 否 | `'/app'` | 路径访问前缀（无尾斜杠亦可） |
 | `passthroughEnvKeys` | array | 否 | `[]` | 允许注入子进程的宿主 env 键名 |
-| `secretEnvKeyPattern` | RegExp | 否 | `/(SECRET\|PASSWORD\|TOKEN\|KEY\|PRIVATE)/i` | 响应脱敏匹配 |
+| `secretEnvKeyPattern` | RegExp | 否 | `/(SECRET\|PASSWORD\|TOKEN\|KEY\|PRIVATE)/i` | 按键名正则脱敏；与显式 `secretEnvKeys` 取并集 |
+| `defaultAppDb` | object | 否 | `appsRoot/_shared/apps-data.sqlite` | 托管应用默认库（须与宿主主库分离） |
+| `dbQueryMaxRows` | number | 否 | `500` | 只读 query SQL 最大返回行数 |
 | `pm2Defaults` | object | 否 | 见下表 | 全局 PM2 默认；可被应用 `pm2Config` 覆盖 |
 | `createAuthenticate` | function | 否 | 见说明 | 返回 `onRequest` 钩子数组；默认尝试 admin |
 | `healthCheckPath` | string | 否 | `'/'` | 部署后就绪探测路径 |
@@ -62,9 +64,9 @@
 | description | string | 否 | - | 描述 |
 | env | object | 否 | `{}` | 应用自有环境变量 |
 | pm2Config | object | 否 | `{}` | PM2 覆盖项 |
-| options | object | 否 | `{}` | 扩展字段 |
+| options | object | 否 | `{}` | 扩展字段；可含 `secretEnvKeys: string[]` 显式密钥键名 |
 
-返回脱敏后的应用对象（含 `port`、`pathUrl`、`passthroughEnvKeys`、`status: 'idle'` 等）。
+返回脱敏后的应用对象（含 `port`、`pathUrl`、`passthroughEnvKeys`、`secretEnvKeys`、`status: 'idle'` 等）。
 
 #### POST `{prefix}/app/save`
 
@@ -77,12 +79,49 @@
 
 #### POST `{prefix}/app/save-env`
 
-仅合并环境变量。
+仅合并环境变量；可选更新显式密钥键列表。
 
 | 参数名 | 类型 | 必填 | 说明 |
 |--------|------|------|------|
 | name | string | 是 | 应用 slug |
 | env | object | 是 | patch：`null` 删键；secret 键值为 `********` 时保持原值 |
+| secretEnvKeys | array | 否 | 显式密钥键名；传入则整体替换并写入 `options.secretEnvKeys`（仅保留仍存在于 env 的键）；省略则沿用原列表 |
+
+> **关键设计**：密钥判定 = 键名匹配 `secretEnvKeyPattern` **或** 出现在 `options.secretEnvKeys`。响应顶层 `secretEnvKeys` 为二者并集，便于管理端把普通变量标成密钥而不改键名。
+
+#### 数据运维与表生命周期
+
+解析后的应用库：应用 `env` 的 `DB_*` 优先，否则注入 `defaultAppDb`。共享库（未自配 `DB_*`）仅能操作 `options.ownedTables`。
+
+> **关键设计**：共享库启动时注入 `DB_TABLE_PREFIX=t_{appName}_`（可用应用 env 覆盖）。子应用若使用 `@kne/fastify-sequelize@>=4.0.4`，存在该环境变量时默认 `forcePrefix`，连接上所有模型（含 account/message/tenant）表名必须以该前缀开头，无法被 `addModels({ prefix })` 覆盖。就绪后按该前缀自动认领表。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `{prefix}/app/db/tables` | 归属表 + 列/主键摘要；`scope=all` 仅独享库 |
+| POST | `{prefix}/app/db/tables/register` | 登记 `ownedTables`（`mode`: `union`/`replace`） |
+| POST | `{prefix}/app/db/tables/sync-owned` | 扫描库表并登记归属（共享库优先领取本应用前缀表；无前缀命中时再领取未被其它应用占用的表） |
+| POST | `{prefix}/app/db/tables/unregister` | 取消登记 |
+| GET | `{prefix}/app/db/rows` | 分页行；`filter` 为 JSON（等值或 `{ $gte,$lte,$gt,$lt }` 范围）；`keyword` 在字符串列上 OR LIKE；`sort` 为 JSON `[{ name, sort: ASC\|DESC }]` |
+| GET | `{prefix}/app/db/row` | 按 `id` 或 `pk` JSON 查一行 |
+| POST | `{prefix}/app/db/row/save` | 按主键 upsert；可选 `autoGenerate`（主键字段 → boolean）空值时用宿主 `sequelize.generateId` 雪花填充 |
+| POST | `{prefix}/app/db/row/remove` | 按主键删除 |
+| POST | `{prefix}/app/db/row/restore` | 按主键恢复软删除（清空 deleted_at） |
+| POST | `{prefix}/app/db/query` | **只读** SQL（`SELECT`/`WITH`/`EXPLAIN`/`SHOW`/`DESCRIBE`/`PRAGMA`）；共享库引用表须归属 |
+| POST | `{prefix}/app/db/export` | 导出归属表为 zip（`mode=file` 仅独享 sqlite） |
+| POST | `{prefix}/app/db/cleanup` | `DROP` 归属表；失败项进入 `sql[]`，`manualRequired` |
+
+#### POST `{prefix}/app/remove`
+
+删除应用。默认先导出再清理所属表；清理不完整则默认**不删**元数据。
+
+| 参数名 | 类型 | 必填 | 默认值 | 说明 |
+|--------|------|------|--------|------|
+| name | string | 是 | - | 应用 slug |
+| exportBeforeRemove | boolean | 否 | `true` | 删除前导出 |
+| cleanupData | boolean | 否 | `true` | 删除前 cleanup |
+| allowRemoveIfCleanupIncomplete | boolean | 否 | `false` | 允许在 `manualRequired` 时仍删管控侧 |
+| force | boolean | 否 | `false` | 跳过导出 |
+| removeSqliteFile | boolean | 否 | `false` | 独享 sqlite 清理成功后删除文件 |
 
 #### POST `{prefix}/app/version/upload`
 
@@ -180,21 +219,23 @@
 
 #### GET `{prefix}/app/logs`
 
-读取日志文件尾部分页（较新页在前）。
+读取日志文件尾部分页（较新页在前）。`perPage` 上限 100。停止实时后前端可用 `beforeLine` 向上滚动加载更早日志。
 
 | 参数名 | 类型 | 必填 | 默认值 | 说明 |
 |--------|------|------|--------|------|
 | name | string | 是 | - | 应用 slug |
 | stream | string | 否 | `'out'` | `out` / `err` |
-| perPage | number | 否 | `100` | 每页行数 |
-| currentPage | number | 否 | `1` | 页码（1=最新一页） |
+| perPage | number | 否 | `100` | 每页行数（最大 100） |
+| currentPage | number | 否 | `1` | 页码（1=最新一页；与 `beforeLine` 二选一） |
+| beforeLine | number | 否 | - | 取行号 `< beforeLine` 的尾部至多 `perPage` 行（上滚历史） |
 
 返回：
 
 ```json
 {
   "pageData": [{ "line": 12, "content": "..." }],
-  "totalCount": 12
+  "totalCount": 12,
+  "hasMore": true
 }
 ```
 
@@ -226,13 +267,16 @@ data: {"appName":"demo","stream":"out","content":"...","line":1}
 |----------|------|
 | `create(data)` | 同 create 接口 |
 | `save({ name, ... })` | 同 save |
-| `saveEnv({ name, env })` | 同 save-env |
+| `saveEnv({ name, env, secretEnvKeys? })` | 同 save-env |
 | `list({ filter, perPage, currentPage })` | 列表 |
 | `detail({ name })` | 详情（脱敏） |
 | `uploadVersion({ name, version, label, zipBuffer })` | 上传版本 |
 | `listVersions({ name, perPage, currentPage })` | 版本列表 |
-| `deploy({ name, versionId, version, runMigration })` | 部署 |
-| `start` / `stop` / `restart` / `remove` (`{ name }`) | 生命周期 |
+| `deploy({ name, versionId, version, runMigration })` | 部署；立即 `deploying`，后台 `syncRealStatus` |
+| `start` / `stop` / `restart` | 生命周期；`start`/`restart` 立即 `deploying`，后台按 PM2+health 写回真实状态 |
+| `syncStatus({ name, recoverIfMissing? })` | 同步单个应用真实状态并返回公开对象 |
+| `syncAllStatuses({ recoverIfMissing? })` | 批量同步（父应用启动 reconcile 使用） |
+| `remove({ name, exportBeforeRemove?, cleanupData?, ... })` | 删除；默认可导出+清理所属表 |
 | `logs({ name, stream, perPage, currentPage })` | 读日志文件 |
 | `findByHost(host)` | 网关：按 domain + `running` 查找 |
 | `findByPathName(name)` | 网关：按 name + `running` 查找 |
@@ -241,13 +285,22 @@ data: {"appName":"demo","stream":"out","content":"...","line":1}
 | `getLogHub()` | 获取 EventEmitter |
 | `toPublicApp(app)` / `mountPrefix(name)` | 序列化辅助 |
 
+#### services.dbops
+
+| 方法签名 | 说明 |
+|----------|------|
+| `listTables` / `registerTables` / `unregisterTables` | 表归属 |
+| `listRows` / `getRow` / `saveRow` / `removeRow` | 行级运维 |
+| `runQuery({ name, sql, replacements? })` | 只读 SQL |
+| `exportData` / `cleanup` | 导出与清理 |
+
 #### services.bootstrap
 
 | 方法签名 | 说明 |
 |----------|------|
-| `onReady()` | 连接 PM2、挂 log bus、reconcile（由插件 `onReady` 调用） |
+| `onReady()` | 连接 PM2、挂 log bus，并 **setImmediate** 异步 `reconcile`（不阻塞父应用 ready） |
 | `onClose()` | 断开 bus / PM2（由插件 `onClose` 调用） |
-| `reconcile()` | 对 DB 中 `running`/`deploying` 但 PM2 未 online 的应用尝试 start |
+| `reconcile()` | 调用 `app.syncAllStatuses({ recoverIfMissing: true })`：按 PM2 真实状态写回 DB；`running`/`deploying` 且进程缺失时尝试拉起 |
 
 ### 数据模型
 
@@ -265,7 +318,7 @@ data: {"appName":"demo","stream":"out","content":"...","line":1}
 | description | string / null | 描述 |
 | env | object | 自有环境变量 |
 | pm2Config | object | PM2 覆盖 |
-| options | object | 扩展字段 |
+| options | object | 扩展字段；`secretEnvKeys` 为显式密钥键名列表 |
 | port | number | 分配端口 |
 | status | string | `idle` / `deploying` / `running` / `stopped` / `error` |
 | currentVersionId | string / null | 当前部署版本 id |
@@ -315,3 +368,5 @@ data: {"appName":"demo","stream":"out","content":"...","line":1}
 ```
 pickHostEnv(passthroughEnvKeys) → app.env → PORT=分配端口（强制）
 ```
+
+API 响应脱敏：`secretEnvKeyPattern` ∪ `options.secretEnvKeys`；明文密钥不回传，顶层 `secretEnvKeys` 只暴露键名。
