@@ -3,44 +3,80 @@ const fs = require('fs-extra');
 const { listSqlFiles } = require('./validatePackage');
 
 const SQL_MIGRATIONS_TABLE = '_fs_sql_migrations';
+const MIGRATION_ACTIONS = ['execute', 'skip', 'hold'];
+const SQL_FILE_NAME_RE = /^[A-Za-z0-9_\-.]+\.sql$/;
+
+const isValidSqlFileName = name => typeof name === 'string' && SQL_FILE_NAME_RE.test(name) && !name.includes('..');
+
+const ensureMigrationsTable = sequelize =>
+  // TIMESTAMP is portable across sqlite / postgres / mysql (avoid DATETIME — missing on PG)
+  sequelize.query(
+    `CREATE TABLE IF NOT EXISTS ${SQL_MIGRATIONS_TABLE} (
+        name VARCHAR(255) PRIMARY KEY,
+        executed_at TIMESTAMP
+      )`
+  );
+
+const readExecutedMigrations = async sequelize => {
+  await ensureMigrationsTable(sequelize);
+  const [rows] = await sequelize.query(`SELECT name, executed_at FROM ${SQL_MIGRATIONS_TABLE}`);
+  return new Map((rows || []).map(r => [r.name, r.executed_at || null]));
+};
+
+const recordMigration = async (sequelize, name) => {
+  await ensureMigrationsTable(sequelize);
+  await sequelize.query(`DELETE FROM ${SQL_MIGRATIONS_TABLE} WHERE name = ?`, { replacements: [name] });
+  await sequelize.query(`INSERT INTO ${SQL_MIGRATIONS_TABLE} (name, executed_at) VALUES (?, ?)`, {
+    replacements: [name, new Date().toISOString()]
+  });
+};
+
+const removeMigrationRecord = async (sequelize, name) => {
+  await ensureMigrationsTable(sequelize);
+  await sequelize.query(`DELETE FROM ${SQL_MIGRATIONS_TABLE} WHERE name = ?`, { replacements: [name] });
+};
 
 /**
  * Run .sql files under server/{sqlPath} with the same tracking semantics as @kne/fastify-sequelize.
+ * actions: { [file]: 'execute' | 'skip' | 'hold' } for pending files; missing entries default to 'execute'.
+ * skip records the file as executed without running it (so the child app won't run it on sync either);
+ * hold leaves it pending.
  */
-const runSqlMigrations = async ({ serverDir, sqlPath = 'sql', env = {}, Sequelize: SequelizeCtor } = {}) => {
+const runSqlMigrations = async ({ serverDir, sqlPath = 'sql', env = {}, Sequelize: SequelizeCtor, actions = {} } = {}) => {
   const sqlDir = path.join(serverDir, sqlPath);
   const files = await listSqlFiles(sqlDir);
   if (!files.length) {
-    return { executed: [], skipped: true };
+    return { executed: [], marked: [], held: [], skipped: true };
   }
 
   const sequelize = createSequelizeFromEnv(env, SequelizeCtor);
   try {
     await sequelize.authenticate();
-    // TIMESTAMP is portable across sqlite / postgres / mysql (avoid DATETIME — missing on PG)
-    await sequelize.query(
-      `CREATE TABLE IF NOT EXISTS ${SQL_MIGRATIONS_TABLE} (
-        name VARCHAR(255) PRIMARY KEY,
-        executed_at TIMESTAMP
-      )`
-    );
-
-    const [rows] = await sequelize.query(`SELECT name FROM ${SQL_MIGRATIONS_TABLE}`);
-    const done = new Set((rows || []).map(r => r.name));
+    const done = await readExecutedMigrations(sequelize);
     const executed = [];
+    const marked = [];
+    const held = [];
 
     for (const file of files) {
       if (done.has(file)) {
         continue;
       }
+      const action = actions[file] || 'execute';
+      if (action === 'hold') {
+        held.push(file);
+        continue;
+      }
+      if (action === 'skip') {
+        await recordMigration(sequelize, file);
+        marked.push(file);
+        continue;
+      }
       const sql = await fs.readFile(path.join(sqlDir, file), 'utf8');
       await sequelize.query(sql);
-      await sequelize.query(`INSERT INTO ${SQL_MIGRATIONS_TABLE} (name, executed_at) VALUES (?, ?)`, {
-        replacements: [file, new Date().toISOString()]
-      });
+      await recordMigration(sequelize, file);
       executed.push(file);
     }
-    return { executed, skipped: false };
+    return { executed, marked, held, skipped: false };
   } finally {
     await sequelize.close();
   }
@@ -70,6 +106,12 @@ const createSequelizeFromEnv = (env, SequelizeCtor) => {
 
 module.exports = {
   SQL_MIGRATIONS_TABLE,
+  MIGRATION_ACTIONS,
+  isValidSqlFileName,
+  ensureMigrationsTable,
+  readExecutedMigrations,
+  recordMigration,
+  removeMigrationRecord,
   runSqlMigrations,
   createSequelizeFromEnv
 };
