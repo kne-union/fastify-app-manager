@@ -185,6 +185,7 @@ describe('@kne/fastify-app-manager', function () {
       expect(html).to.include('runtimePublicUrl="/app/demo"');
       expect(html).to.include('runtimeApiUrl="/app/demo"');
       expect(html).to.include('/app/demo/static/js/main.js');
+      expect(html).to.include('__LOCAL_STORAGE_PREFIX="demo"');
       await fs.remove(dir);
     });
   });

@@ -5,6 +5,8 @@
 适用场景：内网/堡垒机上的业务应用集中托管；不负责多机编排、硬磁盘配额或 WebSocket 升级。
 
 > **关键设计**：子应用前端通过部署时注入的 `runtimePublicUrl` / `runtimeApiUrl` 感知对外前缀；网关对路径模式剥前缀反代，并改写 Location / Cookie / 文本 body 兜底。Scheme B（子进程挂 `APP_BASE_PATH`）已弃用。
+>
+> **存储隔离**：同时注入 `window.__LOCAL_STORAGE_PREFIX="<应用名>"`，`@kne/local-storage`（≥0.1.2，`@kne/token-storage` 底层依赖）读到后自动给 key 加 `<应用名>:` 前缀，避免同源挂载的子应用与宿主、其它子应用互相覆盖登录 token 等本地存储。
 
 ### 核心架构与流程
 
