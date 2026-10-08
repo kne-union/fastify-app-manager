@@ -117,7 +117,7 @@ deploy(versionId)
 
 | 特性 | 说明 |
 |------|------|
-| 版本上传 | Zip Slip 防护、条目数/体积上限、Fullstack 包格式校验、server 生产依赖安装 |
+| 版本上传 | Zip Slip 防护、条目数/体积上限、解压丢弃任意层级 `node_modules`、Fullstack 包格式校验、server 生产依赖安装 |
 | 短部署 | `deploy` / `start` / `restart` 立即返回 `deploying`，后台按 PM2 真实状态 + healthCheck 写回 `running`/`error`/`stopped` |
 | 生命周期 | `start` / `stop` / `restart` / `remove`；父应用重启后异步 `syncAllStatuses` 对齐 PM2 |
 | 双通道访问 | 自定义域名透明反代 + `/app/{name}` 剥前缀反代 |
@@ -196,7 +196,7 @@ await fastify.listen({ port: 3000 });
 | `healthCheckTimeoutMs` | number | 否 | `30000` | 探测总超时（毫秒） |
 | `healthCheckIntervalMs` | number | 否 | `1000` | 探测轮询间隔（毫秒） |
 | `maxZipSize` | number | 否 | `209715200` | zip 最大字节（200MB）；同步 multipart 限制 |
-| `maxZipEntries` | number | 否 | `20000` | zip 最大条目数 |
+| `maxZipEntries` | number | 否 | `20000` | zip 最大条目数（不含被丢弃的 `node_modules` 条目） |
 | `npmInstallTimeoutMs` | number | 否 | `600000` | `server` 目录 `npm install` 超时 |
 | `sseReplayLines` | number | 否 | `100` | SSE 连接时回放最近行数 |
 | `sseHeartbeatMs` | number | 否 | `15000` | SSE 心跳间隔 |
