@@ -282,6 +282,20 @@ describe('plugin integration', function () {
       payload: { name: 'biz', cleanupData: false, exportBeforeRemove: false }
     });
     expect(removed.statusCode).to.equal(200);
+
+    const recreated = await fastify.inject({
+      method: 'POST',
+      url: '/api/v1/app-manager/app/create',
+      payload: { name: 'biz', label: 'Biz Again', domain: 'biz.local' }
+    });
+    expect(recreated.statusCode).to.equal(200);
+    expect(recreated.json().name).to.equal('biz');
+
+    await fastify.inject({
+      method: 'POST',
+      url: '/api/v1/app-manager/app/remove',
+      payload: { name: 'biz', cleanupData: false, exportBeforeRemove: false }
+    });
   });
 
   it('should forward request bodies through the gateway', async () => {
@@ -593,12 +607,16 @@ describe('plugin integration', function () {
       'CREATE TABLE t_demo (id TEXT PRIMARY KEY, name TEXT, deleted_at DATETIME)'
     );
     await sequelize.query(`INSERT INTO t_demo (id, name) VALUES ('1', 'alpha')`);
+    await sequelize.query('CREATE TABLE t_demo_parent (id TEXT PRIMARY KEY)');
+    await sequelize.query('CREATE TABLE t_demo_child (id TEXT PRIMARY KEY, parent_id TEXT REFERENCES t_demo_parent(id))');
+    await sequelize.query(`INSERT INTO t_demo_parent (id) VALUES ('p1')`);
+    await sequelize.query(`INSERT INTO t_demo_child (id, parent_id) VALUES ('c1', 'p1')`);
     await sequelize.close();
 
     await fastify.inject({
       method: 'POST',
       url: '/api/v1/app-manager/app/db/tables/register',
-      payload: { name: 'dataapp', tables: ['t_demo'] }
+      payload: { name: 'dataapp', tables: ['t_demo_parent', 't_demo', 't_demo_child'] }
     });
 
     const tables = await fastify.inject({
@@ -691,7 +709,7 @@ describe('plugin integration', function () {
       url: '/api/v1/app-manager/app/db/cleanup',
       payload: { name: 'dataapp' }
     });
-    expect(cleaned.json().dropped).to.include('t_demo');
+    expect(cleaned.json().dropped).to.include.members(['t_demo', 't_demo_parent', 't_demo_child']);
     expect(cleaned.json().manualRequired).to.equal(false);
 
     const removed = await fastify.inject({

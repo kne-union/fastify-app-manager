@@ -286,7 +286,7 @@ await fastify.listen({ port: 3000 });
 | POST | `{prefix}/app/db/row/restore` | 按主键恢复软删除（清空 deleted_at） |
 | POST | `{prefix}/app/db/query` | **只读** SQL（`SELECT`/`WITH`/`EXPLAIN`/`SHOW`/`DESCRIBE`/`PRAGMA`）；共享库引用表须归属 |
 | POST | `{prefix}/app/db/export` | 导出归属表为 zip（`mode=file` 仅独享 sqlite） |
-| POST | `{prefix}/app/db/cleanup` | `DROP` 归属表；失败项进入 `sql[]`，`manualRequired` |
+| POST | `{prefix}/app/db/cleanup` | `DROP` 归属表；归属表之间有外键时多轮重试直到无进展，仍失败的进入 `sql[]`，`manualRequired` |
 
 ##### POST `{prefix}/app/remove`
 
@@ -520,9 +520,9 @@ data: {"appName":"demo","stream":"out","content":"...","line":1}
 | 属性名 | 类型 | 说明 |
 |--------|------|------|
 | id | string | 雪花主键 |
-| name | string | 应用 slug，唯一 |
+| name | string | 应用 slug，未删除记录内唯一 |
 | label | string | 展示名 |
-| domain | string / null | 绑定 Host，唯一 |
+| domain | string / null | 绑定 Host，未删除记录内唯一 |
 | icon | string / null | 图标 |
 | description | string / null | 描述 |
 | env | object | 自有环境变量 |
@@ -532,10 +532,22 @@ data: {"appName":"demo","stream":"out","content":"...","line":1}
 | status | string | `idle` / `deploying` / `running` / `stopped` / `error` |
 | currentVersionId | string / null | 当前部署版本 id |
 | rootPath | string | 落盘根路径 |
-| pm2Name | string | PM2 进程名，唯一 |
+| pm2Name | string | PM2 进程名，未删除记录内唯一 |
 | message | string / null | 最近状态说明（如健康检查失败原因） |
 
-索引：`status`、`domain`；`name` / `pm2Name` / `domain` 唯一。
+索引：`status`；`name` / `pm2Name` / `domain` 为部分唯一索引（`WHERE deleted_at IS NULL`），删除应用后可用同名 / 同域名重新创建。
+
+从 0.1.6 及以下升级的已有库：`sync` 不会删除旧的完整唯一约束，需在宿主迁移中执行（PostgreSQL，表名按 `dbTableNamePrefix` 调整）：
+
+```sql
+ALTER TABLE t_app_manager_app DROP CONSTRAINT IF EXISTS t_app_manager_app_name_key;
+ALTER TABLE t_app_manager_app DROP CONSTRAINT IF EXISTS t_app_manager_app_domain_key;
+ALTER TABLE t_app_manager_app DROP CONSTRAINT IF EXISTS t_app_manager_app_pm2_name_key;
+DROP INDEX IF EXISTS t_app_manager_app_domain; -- 旧普通索引，与新部分唯一索引同名
+CREATE UNIQUE INDEX IF NOT EXISTS t_app_manager_app_name ON t_app_manager_app ("name") WHERE "deleted_at" IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS t_app_manager_app_domain ON t_app_manager_app ("domain") WHERE "deleted_at" IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS t_app_manager_app_pm2_name ON t_app_manager_app ("pm2_name") WHERE "deleted_at" IS NULL;
+```
 
 ##### appVersion
 

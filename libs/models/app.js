@@ -5,7 +5,6 @@ module.exports = ({ DataTypes }) => {
       name: {
         type: DataTypes.STRING,
         allowNull: false,
-        unique: true,
         comment: '应用 slug / appId'
       },
       label: {
@@ -16,7 +15,6 @@ module.exports = ({ DataTypes }) => {
       domain: {
         type: DataTypes.STRING,
         allowNull: true,
-        unique: true,
         comment: '绑定域名 Host'
       },
       icon: {
@@ -71,7 +69,6 @@ module.exports = ({ DataTypes }) => {
       pm2Name: {
         type: DataTypes.STRING,
         allowNull: false,
-        unique: true,
         comment: 'PM2 进程名'
       },
       message: {
@@ -82,7 +79,7 @@ module.exports = ({ DataTypes }) => {
     },
     options: {
       comment: '托管应用',
-      indexes: [{ fields: ['status'] }, { fields: ['domain'] }]
+      indexes: [{ fields: ['status'] }, { unique: true, fields: ['name'], where: { deleted_at: null } }, { unique: true, fields: ['domain'], where: { deleted_at: null } }, { unique: true, fields: ['pm2_name'], where: { deleted_at: null } }]
     }
   };
 };

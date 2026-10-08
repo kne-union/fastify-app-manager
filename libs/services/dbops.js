@@ -618,20 +618,33 @@ module.exports = fp(async (fastify, options) => {
         result.skipped.push({ reason: 'no owned tables' });
       }
 
-      for (const table of owned) {
-        const dropSql = buildDropSql(sequelize, table);
-        if (dryRun) {
-          result.sql.push(dropSql);
-          continue;
+      if (dryRun) {
+        owned.forEach(table => result.sql.push(buildDropSql(sequelize, table)));
+      } else {
+        // Owned tables may reference each other via foreign keys; retry failed drops until a round makes no progress.
+        let pending = owned;
+        const errors = {};
+        while (pending.length) {
+          const next = [];
+          for (const table of pending) {
+            try {
+              await sequelize.query(buildDropSql(sequelize, table));
+              result.dropped.push(table);
+            } catch (e) {
+              errors[table] = e.message;
+              next.push(table);
+            }
+          }
+          if (next.length === pending.length) {
+            break;
+          }
+          pending = next;
         }
-        try {
-          await sequelize.query(dropSql);
-          result.dropped.push(table);
-        } catch (e) {
-          result.failed.push({ table, error: e.message });
-          result.sql.push(dropSql);
+        pending.forEach(table => {
+          result.failed.push({ table, error: errors[table] });
+          result.sql.push(buildDropSql(sequelize, table));
           result.manualRequired = true;
-        }
+        });
       }
 
       if (all.includes(SQL_MIGRATIONS_TABLE)) {
