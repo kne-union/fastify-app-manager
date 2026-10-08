@@ -134,7 +134,7 @@
 | version | string | 是 | 版本号；同应用内唯一 |
 | label | string | 否 | 版本说明 |
 
-成功返回 `appVersion` 记录（含 `artifactPath`、`hasMigration` 等）。包非法或 npm 失败时回滚产物并返回 400。
+成功返回 `appVersion` 记录（含 `artifactPath`、`hasMigration` 等）。包在临时目录完成解压、校验与 `npm install` 后才写入版本表，上传中或失败的包不会出现在版本列表；包非法或 npm 失败时清理临时目录并返回 400。版本号已存在返回 409；同版本号仅残留软删除记录时会先彻底清除再写入。
 
 #### GET `{prefix}/app/version/list`
 

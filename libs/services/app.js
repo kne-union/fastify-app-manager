@@ -1,5 +1,6 @@
 const fp = require('fastify-plugin');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const fs = require('fs-extra');
 const portPool = require('../utils/portPool');
 const { mergeEnv, maskEnvForResponse, applyEnvPatch, mergePm2Config, normalizeSecretKeys, collectSecretKeys } = require('../utils/env');
@@ -184,40 +185,61 @@ module.exports = fp(async (fastify, options) => {
     if (!app) {
       httpError(404, `app ${name} not found; create it first`);
     }
-    const dup = await models.appVersion.findOne({ where: { appName: name, version } });
-    if (dup) {
+    // The (app_name, version) unique index also covers soft-deleted rows, so they must be purged before reuse.
+    const dup = await models.appVersion.findOne({ where: { appName: name, version }, paranoid: false });
+    if (dup && !dup.isSoftDeleted()) {
       httpError(409, `version ${version} already exists`);
     }
+    if (dup) {
+      await dup.destroy({ force: true });
+    }
 
-    const versionRow = await models.appVersion.create({
-      appName: name,
-      version,
-      label: label || null,
-      artifactPath: path.join(app.rootPath, 'versions', 'pending'),
-      hasMigration: false,
-      migrationPath: options.sqlPath
-    });
-
-    const artifactPath = path.join(app.rootPath, 'versions', String(versionRow.id));
+    // Prepare outside the version table so failed or in-progress uploads never appear in the version list.
+    const versionsDir = path.join(app.rootPath, 'versions');
+    const stagingPath = path.join(versionsDir, `.staging-${crypto.randomUUID()}`);
+    let prepared;
     try {
-      const prepared = await prepareVersionArtifact({
+      prepared = await prepareVersionArtifact({
         zipBuffer,
-        artifactPath,
+        artifactPath: stagingPath,
         maxZipSize: options.maxZipSize,
         maxZipEntries: options.maxZipEntries,
         npmInstallTimeoutMs: options.npmInstallTimeoutMs,
         sqlPath: options.sqlPath
       });
-      await versionRow.update({
-        artifactPath,
-        hasMigration: prepared.hasMigration,
-        migrationPath: prepared.migrationPath
-      });
-      return versionRow.toJSON();
     } catch (e) {
-      await fs.remove(artifactPath).catch(() => {});
-      await versionRow.destroy().catch(() => {});
+      await fs.remove(stagingPath).catch(() => {});
       httpError(400, e.message);
+    }
+
+    let artifactPath = null;
+    try {
+      return await models.appVersion.sequelize.transaction(async transaction => {
+        const versionRow = await models.appVersion.create(
+          {
+            appName: name,
+            version,
+            label: label || null,
+            artifactPath: stagingPath,
+            hasMigration: prepared.hasMigration,
+            migrationPath: prepared.migrationPath
+          },
+          { transaction }
+        );
+        artifactPath = path.join(versionsDir, String(versionRow.id));
+        await fs.move(stagingPath, artifactPath);
+        await versionRow.update({ artifactPath }, { transaction });
+        return versionRow.toJSON();
+      });
+    } catch (e) {
+      await fs.remove(stagingPath).catch(() => {});
+      if (artifactPath) {
+        await fs.remove(artifactPath).catch(() => {});
+      }
+      if (e.name === 'SequelizeUniqueConstraintError') {
+        httpError(409, `version ${version} already exists`);
+      }
+      throw e;
     }
   };
 

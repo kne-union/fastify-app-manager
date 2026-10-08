@@ -27,6 +27,25 @@ const buildPackageZip = async ({ withSql = false } = {}) => {
   return buffer;
 };
 
+const buildUploadRequest = ({ name, version, zipBuffer }) => {
+  const boundary = '----famBoundary';
+  const payload = Buffer.concat([
+    Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="name"\r\n\r\n${name}\r\n` +
+        `--${boundary}\r\nContent-Disposition: form-data; name="version"\r\n\r\n${version}\r\n` +
+        `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="app.zip"\r\nContent-Type: application/zip\r\n\r\n`
+    ),
+    zipBuffer,
+    Buffer.from(`\r\n--${boundary}--\r\n`)
+  ]);
+  return {
+    method: 'POST',
+    url: '/api/v1/app-manager/app/version/upload',
+    headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+    payload
+  };
+};
+
 describe('plugin integration', function () {
   this.timeout(60000);
 
@@ -263,6 +282,44 @@ describe('plugin integration', function () {
       payload: { name: 'biz', cleanupData: false, exportBeforeRemove: false }
     });
     expect(removed.statusCode).to.equal(200);
+  });
+
+  it('should allow reusing a version after failed upload or soft delete', async () => {
+    await fastify.inject({
+      method: 'POST',
+      url: '/api/v1/app-manager/app/create',
+      payload: { name: 'reuse', label: 'Reuse' }
+    });
+    const models = fastify.appManager.models;
+    const invalidZip = new AdmZip();
+    invalidZip.addFile('package.json', Buffer.from('{"name":"broken"}'));
+
+    const failed = await fastify.inject(
+      buildUploadRequest({ name: 'reuse', version: '1.0.0', zipBuffer: invalidZip.toBuffer() })
+    );
+    expect(failed.statusCode).to.equal(400);
+    const leftover = await models.appVersion.count({ where: { appName: 'reuse' }, paranoid: false });
+    expect(leftover).to.equal(0);
+    const appRow = await models.app.findOne({ where: { name: 'reuse' } });
+    const versionsDir = path.join(appRow.rootPath, 'versions');
+    expect(await fs.readdir(versionsDir)).to.deep.equal([]);
+
+    const zipBuffer = await buildPackageZip();
+    const uploaded = await fastify.inject(buildUploadRequest({ name: 'reuse', version: '1.0.0', zipBuffer }));
+    expect(uploaded.statusCode).to.equal(200);
+    const uploadedVersion = uploaded.json();
+    expect(uploadedVersion.artifactPath).to.equal(path.join(versionsDir, String(uploadedVersion.id)));
+    expect(await fs.pathExists(path.join(uploadedVersion.artifactPath, 'server', 'index.js'))).to.equal(true);
+    expect(await fs.readdir(versionsDir)).to.deep.equal([String(uploadedVersion.id)]);
+
+    const duplicate = await fastify.inject(buildUploadRequest({ name: 'reuse', version: '1.0.0', zipBuffer }));
+    expect(duplicate.statusCode).to.equal(409);
+
+    await models.appVersion.destroy({ where: { appName: 'reuse', version: '1.0.0' } });
+    const reuploaded = await fastify.inject(buildUploadRequest({ name: 'reuse', version: '1.0.0', zipBuffer }));
+    expect(reuploaded.statusCode).to.equal(200);
+    const rows = await models.appVersion.count({ where: { appName: 'reuse' }, paranoid: false });
+    expect(rows).to.equal(1);
   });
 
   it('should manage owned tables rows query export and cleanup', async () => {
