@@ -7,7 +7,7 @@ const { mergeEnv, maskEnvForResponse, applyEnvPatch, mergePm2Config, normalizeSe
 const { prepareVersionArtifact } = require('../utils/version');
 const { injectEntryHtml } = require('../utils/entryInject');
 const { ensureLogFiles, readLogTail, readLastLines, appendLog } = require('../utils/logFiles');
-const { runSqlMigrations } = require('../utils/migrate');
+const { runSqlMigrations, MIGRATION_ACTIONS } = require('../utils/migrate');
 const { listSqlFiles } = require('../utils/validatePackage');
 const pm2Util = require('../utils/pm2');
 
@@ -458,7 +458,7 @@ module.exports = fp(async (fastify, options) => {
     });
   };
 
-  const deploy = async ({ name, versionId, version, runMigration = true }) => {
+  const deploy = async ({ name, versionId, version, runMigration = true, migrations }) => {
     const app = await getByName(name);
     let ver = null;
     if (versionId) {
@@ -499,11 +499,18 @@ module.exports = fp(async (fastify, options) => {
         } catch (e) {
           beforeTables = [];
         }
+        const actions = {};
+        for (const item of Array.isArray(migrations) ? migrations : []) {
+          if (item?.name && MIGRATION_ACTIONS.includes(item.action)) {
+            actions[item.name] = item.action;
+          }
+        }
         await runSqlMigrations({
           serverDir: path.join(ver.artifactPath, 'server'),
           sqlPath: ver.migrationPath || options.sqlPath,
           env,
-          Sequelize: fastify.sequelize.Sequelize
+          Sequelize: fastify.sequelize.Sequelize,
+          actions
         });
         try {
           const afterTables = await dbops.withSequelize(app, async sequelize => dbops.listAllTables(sequelize));
@@ -628,16 +635,16 @@ module.exports = fp(async (fastify, options) => {
     return readLogTail(file, { perPage, currentPage, beforeLine });
   };
 
-  const findByHost = async host => {
+  const findByHost = async (host, { running = true } = {}) => {
     if (!host) {
       return null;
     }
     const hostname = String(host).split(':')[0].toLowerCase();
-    return models.app.findOne({ where: { domain: hostname, status: 'running' } });
+    return models.app.findOne({ where: Object.assign({ domain: hostname }, running ? { status: 'running' } : {}) });
   };
 
-  const findByPathName = async name => {
-    return models.app.findOne({ where: { name, status: 'running' } });
+  const findByPathName = async (name, { running = true } = {}) => {
+    return models.app.findOne({ where: Object.assign({ name }, running ? { status: 'running' } : {}) });
   };
 
   Object.assign(fastify[options.name].services, {

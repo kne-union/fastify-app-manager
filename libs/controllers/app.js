@@ -139,7 +139,19 @@ module.exports = fp(async (fastify, options) => {
             name: { type: 'string' },
             versionId: { type: 'string' },
             version: { type: 'string' },
-            runMigration: { type: 'boolean', default: true }
+            runMigration: { type: 'boolean', default: true },
+            migrations: {
+              type: 'array',
+              description: '逐个指定待执行脚本的处理方式；未列出的待执行脚本按 execute 处理',
+              items: {
+                type: 'object',
+                required: ['name', 'action'],
+                properties: {
+                  name: { type: 'string' },
+                  action: { type: 'string', enum: ['execute', 'skip', 'hold'] }
+                }
+              }
+            }
           }
         }
       }

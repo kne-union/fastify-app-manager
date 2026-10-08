@@ -220,7 +220,7 @@ describe('plugin integration', function () {
     const deployed = await fastify.inject({
       method: 'POST',
       url: '/api/v1/app-manager/app/deploy',
-      payload: { name: 'biz', versionId: String(version.id) }
+      payload: { name: 'biz', versionId: String(version.id), migrations: [{ name: '001.sql', action: 'hold' }] }
     });
     expect(deployed.statusCode).to.equal(200);
     expect(deployed.json().status).to.equal('deploying');
@@ -436,6 +436,140 @@ describe('plugin integration', function () {
     expect(reuploaded.statusCode).to.equal(200);
     const rows = await models.appVersion.count({ where: { appName: 'reuse' }, paranoid: false });
     expect(rows).to.equal(1);
+  });
+
+  it('should answer 503 with a status page when a known app is not running', async () => {
+    await fastify.inject({
+      method: 'POST',
+      url: '/api/v1/app-manager/app/create',
+      payload: { name: 'sleepy', label: '<Sleepy>', domain: 'sleepy.local' }
+    });
+    const models = fastify.appManager.models;
+
+    const idlePage = await fastify.inject({ method: 'GET', url: '/app/sleepy/', headers: { host: '127.0.0.1', accept: 'text/html,*/*' } });
+    expect(idlePage.statusCode).to.equal(503);
+    expect(idlePage.headers['content-type']).to.include('text/html');
+    expect(idlePage.headers['cache-control']).to.equal('no-store');
+    expect(idlePage.body).to.include('应用尚未部署');
+    expect(idlePage.body).to.include('&lt;Sleepy&gt;');
+
+    await models.app.update({ status: 'stopped' }, { where: { name: 'sleepy' } });
+    const stoppedPage = await fastify.inject({ method: 'GET', url: '/hello', headers: { host: 'sleepy.local', accept: 'text/html' } });
+    expect(stoppedPage.statusCode).to.equal(503);
+    expect(stoppedPage.body).to.include('应用已停止');
+    expect(stoppedPage.body).to.not.include('http-equiv="refresh"');
+
+    await models.app.update({ status: 'deploying' }, { where: { name: 'sleepy' } });
+    const deployingPage = await fastify.inject({ method: 'GET', url: '/app/sleepy/x', headers: { host: '127.0.0.1', accept: 'text/html' } });
+    expect(deployingPage.body).to.include('http-equiv="refresh"');
+    expect(deployingPage.headers['retry-after']).to.equal('5');
+
+    const api = await fastify.inject({ method: 'POST', url: '/app/sleepy/api/data', headers: { host: '127.0.0.1', accept: 'application/json' }, payload: { a: 1 } });
+    expect(api.statusCode).to.equal(503);
+    expect(api.json()).to.include({ appName: 'sleepy', appStatus: 'deploying' });
+
+    const unknown = await fastify.inject({ method: 'GET', url: '/app/%3Cnobody%3E/', headers: { host: '127.0.0.1', accept: 'text/html' } });
+    expect(unknown.statusCode).to.equal(404);
+    expect(unknown.headers['content-type']).to.include('text/html');
+    expect(unknown.headers['retry-after']).to.equal(undefined);
+    expect(unknown.body).to.include('应用不存在');
+    expect(unknown.body).to.include('&lt;nobody&gt;');
+    expect(unknown.body).to.include('href="/"');
+
+    const unknownApi = await fastify.inject({ method: 'GET', url: '/app/nobody/api/x', headers: { host: '127.0.0.1', accept: 'application/json' } });
+    expect(unknownApi.statusCode).to.equal(404);
+    expect(unknownApi.json()).to.include({ appName: 'nobody', appStatus: 'missing', error: 'Not Found' });
+
+    const hostRoute = await fastify.inject({ method: 'GET', url: '/application', headers: { host: '127.0.0.1', accept: 'text/html' } });
+    expect(hostRoute.body).to.not.include('应用不存在');
+  });
+
+  it('should manage version migration scripts', async () => {
+    const { createSequelizeFromEnv } = require('../libs/utils/migrate');
+    const base = '/api/v1/app-manager/app/version/migration';
+    await fastify.inject({
+      method: 'POST',
+      url: '/api/v1/app-manager/app/create',
+      payload: { name: 'migapp', label: 'Mig' }
+    });
+    const uploaded = await fastify.inject(buildUploadRequest({ name: 'migapp', version: '1.0.0', zipBuffer: await buildPackageZip({ withSql: true }) }));
+    const versionId = String(uploaded.json().id);
+
+    const saved = await fastify.inject({
+      method: 'POST',
+      url: `${base}/save`,
+      payload: { name: 'migapp', versionId, file: '002_t2.sql', content: 'CREATE TABLE IF NOT EXISTS t2 (id INTEGER);' }
+    });
+    expect(saved.statusCode).to.equal(200);
+    await fastify.inject({
+      method: 'POST',
+      url: `${base}/save`,
+      payload: { name: 'migapp', versionId, file: '003_t3.sql', content: 'SELECT 1;' }
+    });
+
+    const invalid = await fastify.inject({
+      method: 'POST',
+      url: `${base}/save`,
+      payload: { name: 'migapp', versionId, file: '../evil.sql', content: 'SELECT 1;' }
+    });
+    expect(invalid.statusCode).to.equal(400);
+
+    const listed = await fastify.inject({ method: 'GET', url: `${base}/list?name=migapp&versionId=${versionId}` });
+    expect(listed.statusCode).to.equal(200);
+    expect(listed.json().dbError).to.equal(null);
+    expect(listed.json().pageData.map(f => [f.name, f.executed])).to.deep.equal([
+      ['001.sql', false],
+      ['002_t2.sql', false],
+      ['003_t3.sql', false]
+    ]);
+
+    const content = await fastify.inject({ method: 'GET', url: `${base}/content?name=migapp&versionId=${versionId}&file=002_t2.sql` });
+    expect(content.json().content).to.include('CREATE TABLE IF NOT EXISTS t2');
+
+    const executed = await fastify.inject({
+      method: 'POST',
+      url: `${base}/action`,
+      payload: { name: 'migapp', versionId, file: '002_t2.sql', action: 'execute' }
+    });
+    expect(executed.statusCode).to.equal(200);
+
+    const marked = await fastify.inject({
+      method: 'POST',
+      url: `${base}/action`,
+      payload: { name: 'migapp', versionId, file: '001.sql', action: 'mark' }
+    });
+    expect(marked.statusCode).to.equal(200);
+
+    let status = (await fastify.inject({ method: 'GET', url: `${base}/list?name=migapp&versionId=${versionId}` })).json().pageData;
+    expect(status.map(f => f.executed)).to.deep.equal([true, true, false]);
+    expect(status[0].executedAt).to.not.equal(null);
+
+    const env = fastify.appManager.services.dbops.resolveEnvForApp((await fastify.inject({ method: 'GET', url: '/api/v1/app-manager/app/detail?name=migapp' })).json());
+    const sequelize = createSequelizeFromEnv(env);
+    const tables = await sequelize.getQueryInterface().showAllTables();
+    await sequelize.close();
+    expect(tables).to.include('t2');
+    expect(tables).to.not.include('t1');
+
+    await fastify.inject({
+      method: 'POST',
+      url: `${base}/action`,
+      payload: { name: 'migapp', versionId, file: '001.sql', action: 'unmark' }
+    });
+    const removed = await fastify.inject({
+      method: 'POST',
+      url: `${base}/remove`,
+      payload: { name: 'migapp', versionId, file: '003_t3.sql' }
+    });
+    expect(removed.statusCode).to.equal(200);
+    status = (await fastify.inject({ method: 'GET', url: `${base}/list?name=migapp&versionId=${versionId}` })).json().pageData;
+    expect(status.map(f => [f.name, f.executed])).to.deep.equal([
+      ['001.sql', false],
+      ['002_t2.sql', true]
+    ]);
+
+    const missing = await fastify.inject({ method: 'GET', url: `${base}/content?name=migapp&versionId=${versionId}&file=003_t3.sql` });
+    expect(missing.statusCode).to.equal(404);
   });
 
   it('should manage owned tables rows query export and cleanup', async () => {

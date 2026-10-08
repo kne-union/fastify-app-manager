@@ -1,6 +1,7 @@
 const fp = require('fastify-plugin');
 const { Readable } = require('node:stream');
 const { rewriteLocation, rewriteSetCookiePath, shouldRewriteBody, rewriteBody } = require('../utils/pathRewrite');
+const { wantsHtml, renderUnavailablePage, getStatusText } = require('../utils/unavailablePage');
 
 module.exports = fp(async (fastify, options) => {
   const ns = options.name;
@@ -66,6 +67,35 @@ module.exports = fp(async (fastify, options) => {
     });
   };
 
+  // Not running (503) or unknown under the path prefix (404): answer here instead of falling through to the host's 404.
+  const replyUnavailable = (request, reply, app) => {
+    const missing = app.status === 'missing';
+    const statusCode = missing ? 404 : 503;
+    reply.code(statusCode).header('cache-control', 'no-store');
+    if (!missing) {
+      reply.header('retry-after', app.status === 'deploying' ? '5' : '60');
+    }
+    if (wantsHtml(request)) {
+      return reply.type('text/html; charset=utf-8').send(Readable.from([Buffer.from(renderUnavailablePage(app))], { objectMode: false }));
+    }
+    const payload = {
+      statusCode,
+      error: missing ? 'Not Found' : 'Service Unavailable',
+      message: getStatusText(app.status).title,
+      appName: app.name,
+      appStatus: app.status
+    };
+    return reply.type('application/json; charset=utf-8').send(Readable.from([Buffer.from(JSON.stringify(payload))], { objectMode: false }));
+  };
+
+  const decodeName = raw => {
+    try {
+      return decodeURIComponent(raw);
+    } catch (e) {
+      return raw;
+    }
+  };
+
   // Domain + path gateway: run early, but skip management API and let other routes try first for non-matches.
   fastify.addHook('onRequest', async (request, reply) => {
     const url = request.raw.url || '';
@@ -79,18 +109,19 @@ module.exports = fp(async (fastify, options) => {
     }
 
     const host = request.headers.host;
-    const byHost = await services.app.findByHost(host);
+    const byHost = await services.app.findByHost(host, { running: false });
     if (byHost) {
-      return proxyToApp(request, reply, byHost, { stripPrefix: false });
+      return byHost.status === 'running' ? proxyToApp(request, reply, byHost, { stripPrefix: false }) : replyUnavailable(request, reply, byHost);
     }
 
     const match = url.match(new RegExp(`^${pathPrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/([^/?#]+)`));
     if (match) {
-      const appName = match[1];
-      const app = await services.app.findByPathName(appName);
+      const appName = decodeName(match[1]);
+      const app = await services.app.findByPathName(appName, { running: false });
       if (app) {
-        return proxyToApp(request, reply, app, { stripPrefix: true });
+        return app.status === 'running' ? proxyToApp(request, reply, app, { stripPrefix: true }) : replyUnavailable(request, reply, app);
       }
+      return replyUnavailable(request, reply, { name: appName, status: 'missing' });
     }
   });
 });

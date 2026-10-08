@@ -173,6 +173,15 @@
 | versionId | string | 否 | - | 版本主键；与 `version` 二选一 |
 | version | string | 否 | - | 版本号 |
 | runMigration | boolean | 否 | `true` | false 时向 app.env 写入 `RUN_SQL_ON_SYNC=false`；预跑 SQL 仍受 `migrateBeforeStart` 约束 |
+| migrations | array | 否 | - | `[{ name, action }]` 逐个指定**待执行**脚本的处理方式；未列出的按 `execute`。仅在 `runMigration` 且 `migrateBeforeStart` 时生效 |
+
+`migrations[].action`：
+
+| 值 | 行为 |
+|----|------|
+| `execute` | 执行脚本并写入 `_fs_sql_migrations` |
+| `skip` | 不执行，只写入执行记录（之后部署和子应用 sync 都不会再执行） |
+| `hold` | 本次不执行也不记账，保持待执行；子应用若启用 `@kne/fastify-sequelize` 的 `runSqlOnSync`，启动时仍可能执行 |
 
 返回示例：
 
@@ -186,6 +195,18 @@
   "domain": null
 }
 ```
+
+#### 版本迁移脚本管理
+
+管理某版本 `server/{migrationPath}` 下的 `.sql` 文件，执行状态读写应用库的 `_fs_sql_migrations`（与 `@kne/fastify-sequelize` 共用，按文件名记账；共享库中不同应用的同名脚本会互相影响）。文件名须匹配 `[A-Za-z0-9_-.]+\.sql`。
+
+| 方法 | 路径 | 参数 | 说明 |
+|------|------|------|------|
+| GET | `{prefix}/app/version/migration/list` | `name`, `versionId` | 脚本列表：`name`、`size`、`updatedAt`、`executed`、`executedAt`；另返回 `migrateBeforeStart`，库连接失败时 `dbError` 有值且 `executed` 为 null |
+| GET | `{prefix}/app/version/migration/content` | `name`, `versionId`, `file` | 返回 `{ name, content }` |
+| POST | `{prefix}/app/version/migration/save` | `name`, `versionId`, `file`, `content` | 新增或覆盖脚本文件，并同步版本 `hasMigration` |
+| POST | `{prefix}/app/version/migration/remove` | `name`, `versionId`, `file` | 删除脚本文件（不改执行记录），并同步 `hasMigration` |
+| POST | `{prefix}/app/version/migration/action` | `name`, `versionId`, `file`, `action` | `execute` 立即执行并记账（执行后按表差异合并归属表）；`mark` 只记账；`unmark` 删除执行记录 |
 
 #### GET `{prefix}/app/list`
 
@@ -272,14 +293,14 @@ data: {"appName":"demo","stream":"out","content":"...","line":1}
 | `detail({ name })` | 详情（脱敏） |
 | `uploadVersion({ name, version, label, zipBuffer })` | 上传版本 |
 | `listVersions({ name, perPage, currentPage })` | 版本列表 |
-| `deploy({ name, versionId, version, runMigration })` | 部署；立即 `deploying`，后台 `syncRealStatus` |
+| `deploy({ name, versionId, version, runMigration, migrations? })` | 部署；立即 `deploying`，后台 `syncRealStatus` |
 | `start` / `stop` / `restart` | 生命周期；`start`/`restart` 立即 `deploying`，后台按 PM2+health 写回真实状态 |
 | `syncStatus({ name, recoverIfMissing? })` | 同步单个应用真实状态并返回公开对象 |
 | `syncAllStatuses({ recoverIfMissing? })` | 批量同步（父应用启动 reconcile 使用） |
 | `remove({ name, exportBeforeRemove?, cleanupData?, ... })` | 删除；默认可导出+清理所属表 |
 | `logs({ name, stream, perPage, currentPage })` | 读日志文件 |
-| `findByHost(host)` | 网关：按 domain + `running` 查找 |
-| `findByPathName(name)` | 网关：按 name + `running` 查找 |
+| `findByHost(host, { running? })` | 网关：按 domain 查找；默认只查 `running`，`running: false` 时不限状态 |
+| `findByPathName(name, { running? })` | 网关：按 name 查找；默认只查 `running`，`running: false` 时不限状态 |
 | `appendAppLog(appName, stream, content)` | 追加日志并 emit hub 事件 |
 | `readLastLines(name, stream, n)` | SSE 回放用 |
 | `getLogHub()` | 获取 EventEmitter |
@@ -293,6 +314,16 @@ data: {"appName":"demo","stream":"out","content":"...","line":1}
 | `listRows` / `getRow` / `saveRow` / `removeRow` | 行级运维 |
 | `runQuery({ name, sql, replacements? })` | 只读 SQL |
 | `exportData` / `cleanup` | 导出与清理 |
+
+#### services.migration
+
+| 方法签名 | 说明 |
+|----------|------|
+| `list({ name, versionId })` | 版本脚本及执行状态 |
+| `content({ name, versionId, file })` | 读脚本内容 |
+| `save({ name, versionId, file, content })` / `remove({ name, versionId, file })` | 新增覆盖 / 删除脚本文件 |
+| `execute` / `mark` / `unmark`（`{ name, versionId, file }`） | 执行并记账 / 只记账 / 删除记录 |
+| `action({ name, versionId, file, action })` | 按 `action` 分发到上面三个方法 |
 
 #### services.bootstrap
 
@@ -349,6 +380,8 @@ data: {"appName":"demo","stream":"out","content":"...","line":1}
 | 机制 | 说明 |
 |------|------|
 | 路由优先级 | 管理 API（`prefix`）不进网关；先 domain 匹配，再 path 前缀匹配 |
+| 应用未运行 | 命中已存在但非 `running` 的应用时返回 503（`Cache-Control: no-store`、`Retry-After`）：浏览器 `GET`/`HEAD` 且 `Accept` 含 `text/html` 返回状态说明页（`deploying` 每 5 秒自动刷新），其余请求返回 JSON `{ statusCode, error, message, appName, appStatus }` |
+| 应用不存在 | `/app/{name}` 下找不到应用时返回 404「应用不存在」页（带返回首页）或 JSON（`appStatus: 'missing'`）；`pathPrefix` 之外以及未绑定的域名仍交给宿主路由 |
 | Location | 相对路径前缀补上 `/app/{name}` |
 | Set-Cookie | `Path=/` 改为 `Path=/app/{name}` |
 | Body | 对文本类 Content-Type，将 `"/static/`、`"/api/`、`"/account/` 等前缀改写；有 `content-encoding` 时跳过 |

@@ -31,6 +31,7 @@ Client / Admin UI
 | Management API | 创建应用、上传版本、部署、启停、日志；均走 `createAuthenticate` |
 | Domain gateway | Host 精确匹配且状态为 `running` 时透明反代，不改写路径 |
 | Path gateway | `/app/{name}` 剥前缀；改写绝对路径 Location、Cookie Path、文本类 body |
+| 未运行兜底 | 应用存在但未 `running` 时，网关返回 503 状态页（已停止 / 启动中 / 异常 / 未部署），接口请求返回 JSON，不再落到宿主 404；`/app/{name}` 下应用不存在时返回 404「应用不存在」页 |
 | PM2 | 每应用一进程，名 `app-manager__{name}`；stdout/stderr 落 `appsRoot/{name}/logs` |
 | Bootstrap | `onReady` 连接 PM2、挂 log bus；**异步**对托管应用做 `syncAllStatuses`（不阻塞父应用 ready） |
 
