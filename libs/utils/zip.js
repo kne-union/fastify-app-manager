@@ -7,6 +7,10 @@ const isPathInside = (parent, child) => {
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 };
 
+const normalizeEntryName = name => name.replace(/^[/\\]+/, '').replace(/\\/g, '/');
+
+const isNodeModulesEntry = name => normalizeEntryName(name).split('/').includes('node_modules');
+
 const extractZipSafe = async (zipBuffer, destDir, { maxZipSize, maxZipEntries }) => {
   if (!Buffer.isBuffer(zipBuffer)) {
     throw new Error('zip content must be a Buffer');
@@ -17,13 +21,14 @@ const extractZipSafe = async (zipBuffer, destDir, { maxZipSize, maxZipEntries })
 
   await fs.ensureDir(destDir);
   const zip = new AdmZip(zipBuffer);
-  const entries = zip.getEntries();
+  // Dependencies are reinstalled after extraction, so bundled node_modules are dropped before the entry limit applies.
+  const entries = zip.getEntries().filter(entry => !isNodeModulesEntry(entry.entryName));
   if (entries.length > maxZipEntries) {
     throw new Error(`zip has too many entries (${entries.length} > ${maxZipEntries})`);
   }
 
   for (const entry of entries) {
-    const entryName = entry.entryName.replace(/^[/\\]+/, '').replace(/\\/g, '/');
+    const entryName = normalizeEntryName(entry.entryName);
     if (!entryName || entryName.includes('\0')) {
       throw new Error('invalid zip entry name');
     }

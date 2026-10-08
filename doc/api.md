@@ -19,7 +19,7 @@
 | `healthCheckTimeoutMs` | number | 否 | `30000` | 探测总超时（毫秒） |
 | `healthCheckIntervalMs` | number | 否 | `1000` | 探测轮询间隔（毫秒） |
 | `maxZipSize` | number | 否 | `209715200` | zip 最大字节（200MB）；同步 multipart 限制 |
-| `maxZipEntries` | number | 否 | `20000` | zip 最大条目数 |
+| `maxZipEntries` | number | 否 | `20000` | zip 最大条目数（不含被丢弃的 `node_modules` 条目） |
 | `npmInstallTimeoutMs` | number | 否 | `600000` | `server` 目录 `npm install` 超时 |
 | `sseReplayLines` | number | 否 | `100` | SSE 连接时回放最近行数 |
 | `sseHeartbeatMs` | number | 否 | `15000` | SSE 心跳间隔 |

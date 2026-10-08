@@ -199,6 +199,22 @@ describe('uncovered utils', function () {
       await fs.remove(dest);
     });
 
+    it('should drop node_modules entries and exclude them from entry limit', async () => {
+      const dest = await fs.mkdtemp(path.join(os.tmpdir(), 'fam-zip-nm-'));
+      const zip = new AdmZip();
+      zip.addFile('package.json', Buffer.from('{"name":"x"}'));
+      zip.addFile('server/index.js', Buffer.from('module.exports=1'));
+      zip.addFile('node_modules/a/index.js', Buffer.from('1'));
+      zip.addFile('server/node_modules/b/index.js', Buffer.from('2'));
+      zip.addFile('pkg/server/node_modules/c/package.json', Buffer.from('{}'));
+      await extractZipSafe(zip.toBuffer(), dest, { maxZipSize: 1024 * 1024, maxZipEntries: 2 });
+      expect(await fs.pathExists(path.join(dest, 'server', 'index.js'))).to.equal(true);
+      expect(await fs.pathExists(path.join(dest, 'node_modules'))).to.equal(false);
+      expect(await fs.pathExists(path.join(dest, 'server', 'node_modules'))).to.equal(false);
+      expect(await fs.pathExists(path.join(dest, 'pkg'))).to.equal(false);
+      await fs.remove(dest);
+    });
+
     it('should reject non-buffer and too many entries', async () => {
       const dest = await fs.mkdtemp(path.join(os.tmpdir(), 'fam-zip-lim-'));
       let threw = false;

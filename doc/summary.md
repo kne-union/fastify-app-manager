@@ -99,7 +99,7 @@ deploy(versionId)
 
 | 特性 | 说明 |
 |------|------|
-| 版本上传 | Zip Slip 防护、条目数/体积上限、Fullstack 包格式校验、server 生产依赖安装 |
+| 版本上传 | Zip Slip 防护、条目数/体积上限、解压丢弃任意层级 `node_modules`、Fullstack 包格式校验、server 生产依赖安装 |
 | 短部署 | `deploy` / `start` / `restart` 立即返回 `deploying`，后台按 PM2 真实状态 + healthCheck 写回 `running`/`error`/`stopped` |
 | 生命周期 | `start` / `stop` / `restart` / `remove`；父应用重启后异步 `syncAllStatuses` 对齐 PM2 |
 | 双通道访问 | 自定义域名透明反代 + `/app/{name}` 剥前缀反代 |
