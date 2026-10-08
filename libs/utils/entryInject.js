@@ -60,7 +60,8 @@ const injectEntryHtml = async ({ buildDir, appName, publicUrl, apiUrl }) => {
       `window.runtimeAppName=${JSON.stringify(appName || '')};` +
       `window.runtimePublicUrl=${JSON.stringify(normalizedPublic)};` +
       `window.runtimeApiUrl=${JSON.stringify(normalizedApi)};` +
-      `window.__webpack_public_path__=${JSON.stringify(publicPath)};`;
+      `window.__webpack_public_path__=${JSON.stringify(publicPath)};` +
+      `window.__LOCAL_STORAGE_PREFIX=${JSON.stringify(appName || '')};`;
     doc.head.insertBefore(scriptEl, doc.head.firstChild);
 
     await fs.writeFile(filePath, dom.serialize());
