@@ -1,4 +1,5 @@
 const fp = require('fastify-plugin');
+const { Readable } = require('node:stream');
 const { rewriteLocation, rewriteSetCookiePath, shouldRewriteBody, rewriteBody } = require('../utils/pathRewrite');
 
 module.exports = fp(async (fastify, options) => {
@@ -19,6 +20,12 @@ module.exports = fp(async (fastify, options) => {
 
     const dest = `http://127.0.0.1:${app.port}${targetPath}`;
     const mountPrefix = `${pathPrefix}/${app.name}`;
+
+    // The gateway runs in onRequest, before body parsing; reply-from only forwards request.body,
+    // so hand it the raw stream or POST/PUT bodies reach the app empty.
+    if (request.method !== 'GET' && request.method !== 'HEAD') {
+      request.body = request.raw;
+    }
 
     return reply.from(dest, {
       rewriteRequestHeaders: (req, headers) => {
@@ -51,7 +58,8 @@ module.exports = fp(async (fastify, options) => {
           }
           const buf = Buffer.concat(chunks.map(c => (Buffer.isBuffer(c) ? c : Buffer.from(c))));
           const text = rewriteBody(buf.toString('utf8'), mountPrefix);
-          return reply.send(text);
+          // A stream payload keeps host onSend hooks that wrap string bodies (e.g. response envelopes) from altering app responses.
+          return reply.send(Readable.from([Buffer.from(text)], { objectMode: false }));
         }
         return reply.send(res.stream);
       }

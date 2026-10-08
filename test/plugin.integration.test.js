@@ -284,6 +284,122 @@ describe('plugin integration', function () {
     expect(removed.statusCode).to.equal(200);
   });
 
+  it('should forward request bodies through the gateway', async () => {
+    await fastify.inject({
+      method: 'POST',
+      url: '/api/v1/app-manager/app/create',
+      payload: { name: 'bodyapp', label: 'Body' }
+    });
+    const models = fastify.appManager.models;
+    const row = await models.app.findOne({ where: { name: 'bodyapp' } });
+    await row.update({ status: 'running', domain: 'bodyapp.local' });
+
+    backend = http.createServer((req, res) => {
+      const chunks = [];
+      req.on('data', chunk => chunks.push(chunk));
+      req.on('end', () => {
+        // octet-stream keeps the gateway from rewriting /api paths in the echoed JSON
+        res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
+        res.end(
+          JSON.stringify({
+            method: req.method,
+            url: req.url,
+            contentType: req.headers['content-type'] || null,
+            body: Buffer.concat(chunks).toString('utf8')
+          })
+        );
+      });
+    });
+    await new Promise((resolve, reject) => {
+      backend.listen(row.port, '127.0.0.1', err => (err ? reject(err) : resolve()));
+    });
+
+    const payload = { email: 'a@b.com', type: 'login' };
+    const viaPath = await fastify.inject({
+      method: 'POST',
+      url: '/app/bodyapp/api/v1/account/sendEmailCode',
+      headers: { host: '127.0.0.1', 'content-type': 'application/json' },
+      payload: JSON.stringify(payload)
+    });
+    expect(viaPath.statusCode).to.equal(200);
+    expect(JSON.parse(viaPath.body).url).to.equal('/api/v1/account/sendEmailCode');
+    expect(JSON.parse(viaPath.body).contentType).to.equal('application/json');
+    expect(JSON.parse(JSON.parse(viaPath.body).body)).to.deep.equal(payload);
+
+    const viaHost = await fastify.inject({
+      method: 'PUT',
+      url: '/api/v1/raw',
+      headers: { host: 'bodyapp.local', 'content-type': 'text/plain' },
+      payload: 'plain-text-body'
+    });
+    expect(viaHost.statusCode).to.equal(200);
+    expect(JSON.parse(viaHost.body).method).to.equal('PUT');
+    expect(JSON.parse(viaHost.body).body).to.equal('plain-text-body');
+
+    const viaGet = await fastify.inject({
+      method: 'GET',
+      url: '/app/bodyapp/api/v1/ping',
+      headers: { host: '127.0.0.1' }
+    });
+    expect(viaGet.statusCode).to.equal(200);
+    expect(JSON.parse(viaGet.body).body).to.equal('');
+  });
+
+  it('should pass app JSON responses through host onSend envelopes untouched', async () => {
+    const host = Fastify({ logger: false });
+    try {
+      await host.register(require('@fastify/sensible'));
+      await host.register(require('@kne/fastify-sequelize'), {
+        db: { dialect: 'sqlite', storage: path.join(appsRoot, 'envelope.sqlite'), logging: false }
+      });
+      // Same shape as @kne/fastify-response-data-format: wraps JSON string payloads.
+      host.addHook('onSend', async (request, reply, payload) => {
+        const contentType = String(reply.getHeader('content-type') || '');
+        if (typeof payload === 'string' && contentType.includes('application/json')) {
+          return JSON.stringify({ code: 0, data: JSON.parse(payload) });
+        }
+        return payload;
+      });
+      await host.register(require('..'), {
+        appsRoot: path.join(appsRoot, 'envelope-apps'),
+        portMin: 5200,
+        portMax: 5299,
+        createAuthenticate: () => [],
+        migrateBeforeStart: false
+      });
+      await host.sequelize.sync();
+      await host.ready();
+
+      await host.inject({
+        method: 'POST',
+        url: '/api/v1/app-manager/app/create',
+        payload: { name: 'envapp', label: 'Env' }
+      });
+      const row = await host.appManager.models.app.findOne({ where: { name: 'envapp' } });
+      await row.update({ status: 'running' });
+
+      backend = http.createServer((req, res) => {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ code: 400, msg: 'bad request', next: '/api/v1/next' }));
+      });
+      await new Promise((resolve, reject) => {
+        backend.listen(row.port, '127.0.0.1', err => (err ? reject(err) : resolve()));
+      });
+
+      const res = await host.inject({
+        method: 'POST',
+        url: '/app/envapp/api/v1/account/sendEmailCode',
+        headers: { host: '127.0.0.1', 'content-type': 'application/json' },
+        payload: '{}'
+      });
+      expect(res.statusCode).to.equal(400);
+      expect(res.headers['content-type']).to.include('application/json');
+      expect(JSON.parse(res.body)).to.deep.equal({ code: 400, msg: 'bad request', next: '/app/envapp/api/v1/next' });
+    } finally {
+      await host.close();
+    }
+  });
+
   it('should allow reusing a version after failed upload or soft delete', async () => {
     await fastify.inject({
       method: 'POST',

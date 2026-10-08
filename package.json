@@ -1,6 +1,6 @@
 {
   "name": "@kne/fastify-app-manager",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Fastify 单机应用市场插件：版本上传、PM2 托管、路径/域名反代与日志 SSE",
   "main": "index.js",
   "scripts": {
