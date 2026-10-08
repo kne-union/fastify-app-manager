@@ -193,6 +193,7 @@ await fastify.listen({ port: 3000 });
 | `dbQueryMaxRows` | number | 否 | `500` | 只读 query SQL 最大返回行数 |
 | `pm2Defaults` | object | 否 | 见下表 | 全局 PM2 默认；可被应用 `pm2Config` 覆盖 |
 | `createAuthenticate` | function | 否 | 见说明 | 返回 `onRequest` 钩子数组；默认尝试 admin |
+| `createUserAuthenticate` | function | 否 | 见说明 | 应用中心等普通用户接口的 `onRequest` 钩子数组；默认尝试 `fastify.account.authenticate.user` |
 | `healthCheckPath` | string | 否 | `'/'` | 部署后就绪探测路径 |
 | `healthCheckTimeoutMs` | number | 否 | `30000` | 探测总超时（毫秒） |
 | `healthCheckIntervalMs` | number | 否 | `1000` | 探测轮询间隔（毫秒） |
@@ -240,11 +241,13 @@ await fastify.listen({ port: 3000 });
 | domain | string | 否 | - | 绑定 Host（唯一）；冲突返回 409 |
 | icon | string | 否 | - | 图标 |
 | description | string | 否 | - | 描述 |
+| category | object / string | 否 | - | 应用分类（应用中心分组用），写入 `options.category`；推荐传 fastify-group 分组对象，对象只保留 `{ code, name }`，字符串原样保存 |
+| isPublic | boolean | 否 | `true` | 是否在公开应用中心展示，写入 `options.isPublic`；未设置视为公开 |
 | env | object | 否 | `{}` | 应用自有环境变量 |
 | pm2Config | object | 否 | `{}` | PM2 覆盖项 |
 | options | object | 否 | `{}` | 扩展字段；可含 `secretEnvKeys: string[]` 显式密钥键名 |
 
-返回脱敏后的应用对象（含 `port`、`pathUrl`、`passthroughEnvKeys`、`secretEnvKeys`、`status: 'idle'` 等）。
+返回脱敏后的应用对象（含 `port`、`pathUrl`、`category`、`passthroughEnvKeys`、`secretEnvKeys`、`status: 'idle'` 等）。
 
 ##### POST `{prefix}/app/save`
 
@@ -254,6 +257,8 @@ await fastify.listen({ port: 3000 });
 |--------|------|------|------|
 | name | string | 是 | 应用 slug |
 | label / domain / icon / description / env / pm2Config / options | - | 否 | 传入的字段才更新；`env` 按 patch 语义合并 |
+| category | object / string / null | 否 | 合并写入 `options.category`（对象只保留 `{ code, name }`），不影响 `options` 其它键；传空值清除分类 |
+| isPublic | boolean | 否 | 合并写入 `options.isPublic`，不影响 `options` 其它键 |
 
 ##### POST `{prefix}/app/save-env`
 
@@ -397,6 +402,31 @@ await fastify.listen({ port: 3000 });
 
 返回 `{ pageData, totalCount }`，元素均为脱敏后的应用对象。
 
+##### GET `{prefix}/app/center/list`
+
+应用中心列表，使用 `createUserAuthenticate` 鉴权（普通登录用户可访问）。仅返回 `status: 'running'` 的应用，且只含公开字段（不含 env、端口、路径等）。
+
+```json
+{
+  "pageData": [
+    {
+      "name": "demo",
+      "label": "Demo",
+      "icon": "file-id",
+      "description": "d",
+      "category": { "code": "tools", "name": "工具" },
+      "isPublic": true,
+      "pathUrl": "/app/demo/"
+    }
+  ],
+  "totalCount": 1
+}
+```
+
+##### GET `{prefix}/app/center/public-list`
+
+公开应用中心列表，**无需登录**。返回结构同 `app/center/list`，仅包含运行中且 `isPublic` 不为 `false` 的应用。
+
 ##### GET `{prefix}/app/detail`
 
 | 参数名 | 类型 | 必填 | 说明 |
@@ -527,7 +557,7 @@ data: {"appName":"demo","stream":"out","content":"...","line":1}
 | description | string / null | 描述 |
 | env | object | 自有环境变量 |
 | pm2Config | object | PM2 覆盖 |
-| options | object | 扩展字段；`secretEnvKeys` 为显式密钥键名列表 |
+| options | object | 扩展字段；`secretEnvKeys` 为显式密钥键名列表，`category` 为应用分类，`isPublic` 为是否公开（未设置视为公开） |
 | port | number | 分配端口 |
 | status | string | `idle` / `deploying` / `running` / `stopped` / `error` |
 | currentVersionId | string / null | 当前部署版本 id |

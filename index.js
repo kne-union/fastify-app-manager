@@ -54,6 +54,13 @@ module.exports = fp(
             return [fastify.account.authenticate.admin];
           }
           return [];
+        },
+        /** 普通登录用户可访问的接口（应用中心列表） */
+        createUserAuthenticate: () => {
+          if (fastify.account?.authenticate?.user) {
+            return [fastify.account.authenticate.user];
+          }
+          return [];
         }
       },
       options

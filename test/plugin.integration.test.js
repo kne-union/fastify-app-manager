@@ -164,6 +164,56 @@ describe('plugin integration', function () {
     });
     expect(detail.json().name).to.equal('demo');
     expect(detail.json().secretEnvKeys).to.include('PLAIN_DB');
+
+    const categorized = await fastify.inject({
+      method: 'POST',
+      url: '/api/v1/app-manager/app/save',
+      payload: { name: 'demo', category: { id: 'g1', code: 'tools', name: '工具', parentId: null, children: [], options: { color: '#1677ff' } } }
+    });
+    expect(categorized.json().category).to.deep.equal({ code: 'tools', name: '工具' });
+    expect(categorized.json().secretEnvKeys).to.include('PLAIN_DB');
+
+    expect(categorized.json().isPublic).to.equal(true);
+
+    const createdWithCategory = await fastify.inject({
+      method: 'POST',
+      url: '/api/v1/app-manager/app/create',
+      payload: { name: 'demo-social', label: 'Social', category: 'social', isPublic: false }
+    });
+    expect(createdWithCategory.json().category).to.equal('social');
+    expect(createdWithCategory.json().isPublic).to.equal(false);
+
+    const centerEmpty = await fastify.inject({ method: 'GET', url: '/api/v1/app-manager/app/center/list' });
+    expect(centerEmpty.json().totalCount).to.equal(0);
+
+    await fastify.appManager.models.app.update({ status: 'running' }, { where: { name: ['demo', 'demo-social'] } });
+    const center = await fastify.inject({ method: 'GET', url: '/api/v1/app-manager/app/center/list' });
+    expect(center.json().totalCount).to.equal(2);
+    const demoItem = center.json().pageData.find(i => i.name === 'demo');
+    expect(demoItem).to.deep.equal({
+      name: 'demo',
+      label: 'Demo Updated',
+      icon: null,
+      description: 'd',
+      category: { code: 'tools', name: '工具' },
+      isPublic: true,
+      pathUrl: '/app/demo/'
+    });
+
+    const publicCenter = await fastify.inject({ method: 'GET', url: '/api/v1/app-manager/app/center/public-list' });
+    expect(publicCenter.json().pageData.map(i => i.name)).to.deep.equal(['demo']);
+
+    const madePrivate = await fastify.inject({
+      method: 'POST',
+      url: '/api/v1/app-manager/app/save',
+      payload: { name: 'demo', isPublic: false }
+    });
+    expect(madePrivate.json().isPublic).to.equal(false);
+    expect(madePrivate.json().category).to.deep.equal({ code: 'tools', name: '工具' });
+    const publicAfter = await fastify.inject({ method: 'GET', url: '/api/v1/app-manager/app/center/public-list' });
+    expect(publicAfter.json().totalCount).to.equal(0);
+
+    await fastify.appManager.models.app.update({ status: 'idle' }, { where: { name: ['demo', 'demo-social'] } });
   });
 
   it('should upload version deploy lifecycle and read logs', async () => {

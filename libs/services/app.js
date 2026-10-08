@@ -31,6 +31,18 @@ module.exports = fp(async (fastify, options) => {
   const mountPrefix = name => `${options.pathPrefix.replace(/\/$/, '')}/${name}`;
 
   const resolveSecretEnvKeys = appLike => normalizeSecretKeys(appLike?.options?.secretEnvKeys);
+  // 未设置视为公开（与远程组件默认公开一致）
+  const isAppPublic = appLike => appLike?.options?.isPublic !== false;
+  // 分组选择器的值可能是整条分组记录（含 id/children/options），只保留 code/name
+  const normalizeCategory = category => {
+    if (!category) {
+      return null;
+    }
+    if (typeof category !== 'object') {
+      return String(category);
+    }
+    return category.code ? { code: category.code, name: category.name || category.code } : null;
+  };
 
   const toPublicApp = app => {
     if (!app) {
@@ -43,6 +55,8 @@ module.exports = fp(async (fastify, options) => {
     json.passthroughEnvKeys = options.passthroughEnvKeys || [];
     json.secretEnvKeys = collectSecretKeys(json.env || {}, envOpts);
     json.pathUrl = `${mountPrefix(json.name)}/`;
+    json.category = json.options?.category || null;
+    json.isPublic = isAppPublic(json);
     return json;
   };
 
@@ -55,7 +69,7 @@ module.exports = fp(async (fastify, options) => {
   };
 
   const create = async data => {
-    const { name, label, domain, icon, description, env, pm2Config, options: appOptions } = data;
+    const { name, label, domain, icon, description, category, isPublic, env, pm2Config, options: appOptions } = data;
     if (!name || !NAME_RE.test(name)) {
       httpError(400, 'invalid name: use lowercase slug [a-z0-9-]');
     }
@@ -89,6 +103,12 @@ module.exports = fp(async (fastify, options) => {
     if (normalizedOptions.secretEnvKeys !== undefined) {
       normalizedOptions.secretEnvKeys = normalizeSecretKeys(normalizedOptions.secretEnvKeys);
     }
+    if (category !== undefined) {
+      normalizedOptions.category = normalizeCategory(category);
+    }
+    if (isPublic !== undefined) {
+      normalizedOptions.isPublic = !!isPublic;
+    }
 
     const app = await models.app.create({
       name,
@@ -108,7 +128,7 @@ module.exports = fp(async (fastify, options) => {
     return toPublicApp(app);
   };
 
-  const save = async ({ name, ...data }) => {
+  const save = async ({ name, category, isPublic, ...data }) => {
     const app = await getByName(name);
     const omit = ['name', 'port', 'rootPath', 'pm2Name', 'status', 'currentVersionId'];
     const patch = {};
@@ -132,6 +152,12 @@ module.exports = fp(async (fastify, options) => {
       patch.options = Object.assign({}, patch.options, {
         secretEnvKeys: normalizeSecretKeys(patch.options.secretEnvKeys)
       });
+    }
+    if (category !== undefined) {
+      patch.options = Object.assign({}, patch.options || app.options || {}, { category: normalizeCategory(category) });
+    }
+    if (isPublic !== undefined) {
+      patch.options = Object.assign({}, patch.options || app.options || {}, { isPublic: !!isPublic });
     }
     await app.update(patch);
     return toPublicApp(app);
@@ -170,6 +196,22 @@ module.exports = fp(async (fastify, options) => {
       pageData: rows.map(toPublicApp),
       totalCount: count
     };
+  };
+
+  const centerList = async ({ publicOnly = false } = {}) => {
+    const rows = await models.app.findAll({ where: { status: 'running' }, order: [['createdAt', 'DESC']] });
+    const pageData = rows
+      .filter(app => !publicOnly || isAppPublic(app))
+      .map(app => ({
+        name: app.name,
+        label: app.label,
+        icon: app.icon,
+        description: app.description,
+        category: app.options?.category || null,
+        isPublic: isAppPublic(app),
+        pathUrl: `${mountPrefix(app.name)}/`
+      }));
+    return { pageData, totalCount: pageData.length };
   };
 
   const detail = async ({ name }) => {
@@ -653,6 +695,7 @@ module.exports = fp(async (fastify, options) => {
       save,
       saveEnv,
       list,
+      centerList,
       detail,
       uploadVersion,
       listVersions,

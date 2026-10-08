@@ -4,6 +4,7 @@ const { createSseReply } = require('../utils/logStream');
 module.exports = fp(async (fastify, options) => {
   const { services } = fastify[options.name];
   const auth = () => options.createAuthenticate();
+  const userAuth = () => options.createUserAuthenticate();
 
   fastify.post(
     `${options.prefix}/app/create`,
@@ -20,6 +21,8 @@ module.exports = fp(async (fastify, options) => {
             domain: { type: 'string' },
             icon: { type: 'string' },
             description: { type: 'string' },
+            category: { type: ['object', 'string', 'null'] },
+            isPublic: { type: 'boolean' },
             env: { type: 'object' },
             pm2Config: { type: 'object' },
             options: { type: 'object' }
@@ -45,6 +48,8 @@ module.exports = fp(async (fastify, options) => {
             domain: { type: 'string' },
             icon: { type: 'string' },
             description: { type: 'string' },
+            category: { type: ['object', 'string', 'null'] },
+            isPublic: { type: 'boolean' },
             env: { type: 'object' },
             pm2Config: { type: 'object' },
             options: { type: 'object' }
@@ -53,6 +58,27 @@ module.exports = fp(async (fastify, options) => {
       }
     },
     async request => services.app.save(request.body)
+  );
+
+  fastify.get(
+    `${options.prefix}/app/center/list`,
+    {
+      onRequest: userAuth(),
+      schema: {
+        summary: '应用中心：运行中应用的公开信息（普通登录用户可访问）'
+      }
+    },
+    async () => services.app.centerList()
+  );
+
+  fastify.get(
+    `${options.prefix}/app/center/public-list`,
+    {
+      schema: {
+        summary: '应用中心：运行中且公开的应用（无需登录）'
+      }
+    },
+    async () => services.app.centerList({ publicOnly: true })
   );
 
   fastify.post(
