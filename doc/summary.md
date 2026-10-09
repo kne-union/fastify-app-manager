@@ -32,8 +32,8 @@ Client / Admin UI
 | Domain gateway | Host 精确匹配且状态为 `running` 时透明反代，不改写路径 |
 | Path gateway | `/app/{name}` 剥前缀；改写绝对路径 Location、Cookie Path、文本类 body |
 | 未运行兜底 | 应用存在但未 `running` 时，网关返回 503 状态页（已停止 / 启动中 / 异常 / 未部署），接口请求返回 JSON，不再落到宿主 404；`/app/{name}` 下应用不存在时返回 404「应用不存在」页 |
-| PM2 | 每应用一进程，名 `app-manager__{name}`；stdout/stderr 落 `appsRoot/{name}/logs` |
-| Bootstrap | `onReady` 连接 PM2、挂 log bus；**异步**对托管应用做 `syncAllStatuses`（不阻塞父应用 ready） |
+| PM2 | 每应用一进程，名 `app-manager__{name}`；stdout/stderr 由 PM2 落 `appsRoot/{name}/logs`，插件按大小/按天切分归档 |
+| Bootstrap | `onReady` 连接 PM2、挂 log bus（只推 SSE）、启动日志切分与负载采样定时器；**异步**对托管应用做 `syncAllStatuses`（不阻塞父应用 ready） |
 
 #### 部署时序
 
@@ -89,7 +89,7 @@ deploy(versionId)
 | 显式密钥 | 存于 `options.secretEnvKeys`；`save-env` 可传 `secretEnvKeys` 将普通键标为密钥；响应顶层回传合并后的键名列表（不含明文） |
 | 默认托管库 | `defaultAppDb`（默认 `appsRoot/_shared/apps-data.sqlite`），与宿主主库强制分离；应用未配 `DB_*` 时注入 |
 | 应用自有库 | 应用 `env` 含完整 `DB_*` 时为独享库（`dbScope=dedicated`） |
-| 共享库表前缀 | 启动时注入 `DB_TABLE_PREFIX=t_{appName}_`（应用可显式覆盖）；子应用 sequelize 须读取该变量建表 |
+| 共享库表前缀 | 启动时注入 `DB_TABLE_PREFIX=t_{appName}_` 并由系统写回应用 env（接口不返回、不可修改）；子应用 sequelize 须读取该变量建表 |
 | 表归属 | `options.ownedTables`；共享库启动就绪后按前缀自动认领，亦可 `sync-owned` 扫描；运维仅限归属表 |
 
 #### SQL 迁移
@@ -104,7 +104,9 @@ deploy(versionId)
 | 短部署 | `deploy` / `start` / `restart` 立即返回 `deploying`，后台按 PM2 真实状态 + healthCheck 写回 `running`/`error`/`stopped` |
 | 生命周期 | `start` / `stop` / `restart` / `remove`；父应用重启后异步 `syncAllStatuses` 对齐 PM2 |
 | 双通道访问 | 自定义域名透明反代 + `/app/{name}` 剥前缀反代 |
-| 日志 | 文件落盘 + 历史分页（`beforeLine` 上滚、每页最多 100 行）+ SSE（含回放行与心跳） |
+| 日志 | PM2 落盘 + 历史分页（`beforeLine` 上滚、每页最多 100 行）+ SSE（含回放行与心跳） |
+| 日志切分与归档 | 按大小（`logMaxSize`）与按天（`logTimezone` 零点，默认 +08:00）切分；归档 gzip、按数量/天数清理；接口可列出、分页读取、下载（单个或多选打包 zip）、删除归档；返回的行时间前缀换算到 `logTimezone` |
+| 负载监控 | 每 5 秒采样 PM2 进程指标（CPU、内存、运行时长、重启次数）与网关请求指标（QPS、每分钟请求数、平均 RT / P95 / P99、5xx 错误率、上游异常、并发）；内存保留最近 10 分钟，SSE 连接先回放历史再实时推送 |
 | 鉴权 | `createAuthenticate` 可注入；默认尝试 `fastify.account.authenticate.admin` |
 | 数据运维 | 归属表浏览、行 CRUD、只读 query SQL、导出 zip、cleanup（无权限返回 SQL） |
 

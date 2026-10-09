@@ -2,17 +2,7 @@ const { expect } = require('chai');
 const path = require('node:path');
 const fs = require('fs-extra');
 const os = require('node:os');
-const {
-  mergeEnv,
-  maskEnvForResponse,
-  applyEnvPatch,
-  SECRET_MASK,
-  normalizeSecretKeys,
-  collectSecretKeys,
-  hasAppDbConfig,
-  buildDefaultAppDbEnv,
-  resolveAppDbEnv
-} = require('../libs/utils/env');
+const { mergeEnv, maskEnvForResponse, applyEnvPatch, SECRET_MASK, normalizeSecretKeys, collectSecretKeys, hasAppDbConfig, buildDefaultAppDbEnv, resolveAppDbEnv } = require('../libs/utils/env');
 const { assertDefaultAppDbSeparated, resolveDbScope, buildTablePrefix } = require('../libs/utils/dbIdentity');
 const { assertReadOnlyQuerySql } = require('../libs/utils/sqlQueryGuard');
 const { validatePackageRoot } = require('../libs/utils/validatePackage');
@@ -56,6 +46,14 @@ describe('@kne/fastify-app-manager', function () {
       expect(next.NAME).to.equal('b');
       expect(normalizeSecretKeys([' a ', 'a', '', null])).to.deep.equal(['a']);
       expect(collectSecretKeys({ PLAIN_DB: 'x', API_KEY: 'y', NAME: 'z' }, opts)).to.deep.equal(['PLAIN_DB', 'API_KEY']);
+    });
+
+    it('should hide and protect system env keys', () => {
+      expect(maskEnvForResponse({ DB_TABLE_PREFIX: 't_a_', NAME: 'a' }, {})).to.deep.equal({ NAME: 'a' });
+      expect(applyEnvPatch({ DB_TABLE_PREFIX: 't_a_' }, { DB_TABLE_PREFIX: 't_b_', NAME: 'a' })).to.deep.equal({ DB_TABLE_PREFIX: 't_a_', NAME: 'a' });
+      expect(applyEnvPatch({ DB_TABLE_PREFIX: 't_a_' }, { DB_TABLE_PREFIX: null })).to.deep.equal({ DB_TABLE_PREFIX: 't_a_' });
+      expect(applyEnvPatch({}, { DB_TABLE_PREFIX: 't_b_' })).to.deep.equal({});
+      expect(collectSecretKeys({}, { secretEnvKeys: ['DB_TABLE_PREFIX', 'X'] })).to.deep.equal(['X']);
     });
 
     it('should inject defaultAppDb when app has no DB config', () => {
@@ -105,9 +103,7 @@ describe('@kne/fastify-app-manager', function () {
 
     it('should reject defaultAppDb same as host sqlite', () => {
       const storage = '/tmp/same-host.db';
-      expect(() =>
-        assertDefaultAppDbSeparated({ dialect: 'sqlite', storage }, { options: { dialect: 'sqlite', storage } })
-      ).to.throw(/separated/);
+      expect(() => assertDefaultAppDbSeparated({ dialect: 'sqlite', storage }, { options: { dialect: 'sqlite', storage } })).to.throw(/separated/);
     });
   });
 

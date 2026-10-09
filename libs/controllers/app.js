@@ -1,5 +1,8 @@
 const fp = require('fastify-plugin');
+const fs = require('fs-extra');
+const yazl = require('yazl');
 const { createSseReply } = require('../utils/logStream');
+const { formatInTz } = require('../utils/logTime');
 
 module.exports = fp(async (fastify, options) => {
   const { services } = fastify[options.name];
@@ -280,12 +283,118 @@ module.exports = fp(async (fastify, options) => {
             beforeLine: {
               type: 'number',
               description: 'Load up to perPage lines with line number < beforeLine (for scroll-up history)'
+            },
+            file: {
+              type: 'string',
+              description: 'Archive file name from /app/logs/files; overrides stream'
             }
           }
         }
       }
     },
     async request => services.app.logs(request.query)
+  );
+
+  fastify.get(
+    `${options.prefix}/app/logs/files`,
+    {
+      onRequest: auth(),
+      schema: {
+        summary: '列出应用日志文件（当前文件与归档）',
+        query: {
+          type: 'object',
+          required: ['name'],
+          properties: {
+            name: { type: 'string' }
+          }
+        }
+      }
+    },
+    async request => services.app.logFiles(request.query)
+  );
+
+  fastify.get(
+    `${options.prefix}/app/logs/download`,
+    {
+      onRequest: auth(),
+      schema: {
+        summary: '下载日志文件',
+        query: {
+          type: 'object',
+          required: ['name', 'file'],
+          properties: {
+            name: { type: 'string' },
+            file: { type: 'string' }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      const { name } = request.query;
+      const { path: filePath, fileName, size, compressed } = await services.app.resolveAppLogFile(request.query);
+      reply.header('Content-Type', compressed ? 'application/gzip' : 'text/plain; charset=utf-8');
+      reply.header('Content-Disposition', `attachment; filename="${name}-${fileName}"`);
+      reply.header('Content-Length', size);
+      if (size === 0) {
+        return reply.send('');
+      }
+      // 当前日志仍在被 PM2 追加，只读到 stat 时的长度，保证与 Content-Length 一致
+      return reply.send(fs.createReadStream(filePath, { start: 0, end: size - 1 }));
+    }
+  );
+
+  fastify.get(
+    `${options.prefix}/app/logs/download-zip`,
+    {
+      onRequest: auth(),
+      schema: {
+        summary: '批量打包下载日志文件',
+        query: {
+          type: 'object',
+          required: ['name', 'files'],
+          properties: {
+            name: { type: 'string' },
+            files: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 100 }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      const { name, files } = await services.app.resolveAppLogFiles(request.query);
+      const zipFile = new yazl.ZipFile();
+      for (const { path: filePath, fileName, size, mtime, compressed } of files) {
+        if (size === 0) {
+          zipFile.addBuffer(Buffer.alloc(0), fileName, { mtime });
+          continue;
+        }
+        // .gz 归档已压缩，原样存入；当前日志只打包到 stat 时的长度
+        zipFile.addReadStream(fs.createReadStream(filePath, { start: 0, end: size - 1 }), fileName, { mtime, size, compress: !compressed });
+      }
+      zipFile.end();
+      const stamp = formatInTz(new Date(), options.logTimezone, 'YYYYMMDD-HHmmss');
+      reply.header('Content-Type', 'application/zip');
+      reply.header('Content-Disposition', `attachment; filename="${name}-logs-${stamp}.zip"`);
+      return reply.send(zipFile.outputStream);
+    }
+  );
+
+  fastify.post(
+    `${options.prefix}/app/logs/remove`,
+    {
+      onRequest: auth(),
+      schema: {
+        summary: '删除选中的日志归档',
+        body: {
+          type: 'object',
+          required: ['name', 'files'],
+          properties: {
+            name: { type: 'string' },
+            files: { type: 'array', minItems: 1, items: { type: 'string' } }
+          }
+        }
+      }
+    },
+    async request => services.app.removeLogFiles(request.body)
   );
 
   fastify.get(
@@ -333,6 +442,56 @@ module.exports = fp(async (fastify, options) => {
       hub?.on(eventName, onLog);
       request.raw.on('close', () => {
         hub?.off(eventName, onLog);
+        sse.close();
+      });
+    }
+  );
+
+  fastify.get(
+    `${options.prefix}/app/load`,
+    {
+      onRequest: auth(),
+      schema: {
+        summary: '应用当前负载与最近历史',
+        query: {
+          type: 'object',
+          required: ['name'],
+          properties: {
+            name: { type: 'string' }
+          }
+        }
+      }
+    },
+    async request => services.app.load(request.query)
+  );
+
+  fastify.get(
+    `${options.prefix}/app/load/stream`,
+    {
+      onRequest: auth(),
+      schema: {
+        summary: 'SSE 实时负载',
+        query: {
+          type: 'object',
+          required: ['name'],
+          properties: {
+            name: { type: 'string' }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      const { name } = request.query;
+      const { intervalMs, pageData } = await services.app.load({ name });
+      const sse = createSseReply(reply, { heartbeatMs: options.sseHeartbeatMs });
+      sse.writeEvent('history', { intervalMs, pageData });
+
+      const store = services.app.getLoadStore();
+      const onLoad = sample => sse.writeEvent('load', sample);
+      const eventName = `load:${name}`;
+      store?.emitter.on(eventName, onLoad);
+      request.raw.on('close', () => {
+        store?.emitter.off(eventName, onLoad);
         sse.close();
       });
     }

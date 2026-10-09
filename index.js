@@ -2,6 +2,7 @@ const fp = require('fastify-plugin');
 const path = require('node:path');
 const fs = require('fs-extra');
 const { assertDefaultAppDbSeparated } = require('./libs/utils/dbIdentity');
+const { parseTimezone } = require('./libs/utils/logTime');
 
 module.exports = fp(
   async (fastify, options) => {
@@ -26,6 +27,14 @@ module.exports = fp(
         sseReplayLines: 100,
         sseHeartbeatMs: 15000,
         logMaxSize: 50 * 1024 * 1024,
+        logTimezone: '+08:00',
+        logRotateDaily: true,
+        logRotateIntervalMs: 60 * 1000,
+        logRetentionMaxFiles: 10,
+        logRetentionDays: 30,
+        logCompress: true,
+        loadSampleIntervalMs: 5000,
+        loadHistoryMinutes: 10,
         passthroughEnvKeys: [],
         secretEnvKeyPattern: /(SECRET|PASSWORD|TOKEN|KEY|PRIVATE)/i,
         sqlPath: 'sql',
@@ -65,6 +74,8 @@ module.exports = fp(
       },
       options
     );
+
+    parseTimezone(options.logTimezone);
 
     if (!options.defaultAppDb) {
       options.defaultAppDb = {

@@ -22,6 +22,13 @@ module.exports = fp(async (fastify, options) => {
     const dest = `http://127.0.0.1:${app.port}${targetPath}`;
     const mountPrefix = `${pathPrefix}/${app.name}`;
 
+    const tracker = fastify[ns].requestMetrics?.begin(app.name);
+    if (tracker) {
+      const finish = () => tracker.end({ statusCode: reply.raw.statusCode });
+      reply.raw.once('finish', finish);
+      reply.raw.once('close', finish);
+    }
+
     // The gateway runs in onRequest, before body parsing; reply-from only forwards request.body,
     // so hand it the raw stream or POST/PUT bodies reach the app empty.
     if (request.method !== 'GET' && request.method !== 'HEAD') {
@@ -29,6 +36,10 @@ module.exports = fp(async (fastify, options) => {
     }
 
     return reply.from(dest, {
+      onError: (reply, { error }) => {
+        tracker?.markUpstreamError();
+        reply.send(error);
+      },
       rewriteRequestHeaders: (req, headers) => {
         const next = { ...headers };
         delete next['content-length'];
