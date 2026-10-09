@@ -24,7 +24,15 @@
 | `npmInstallTimeoutMs` | number | 否 | `600000` | `server` 目录 `npm install` 超时 |
 | `sseReplayLines` | number | 否 | `100` | SSE 连接时回放最近行数 |
 | `sseHeartbeatMs` | number | 否 | `15000` | SSE 心跳间隔 |
-| `logMaxSize` | number | 否 | `52428800` | 预留：单日志文件上限（50MB） |
+| `logMaxSize` | number | 否 | `52428800` | 单日志文件上限（50MB），达到即切分；`0` 关闭按大小切分 |
+| `logTimezone` | string | 否 | `'+08:00'` | 日志时区：固定偏移（`'+08:00'`、`'-05:30'`）或 IANA 名称（`'Asia/Shanghai'`）；非法值注册时抛错 |
+| `logRotateDaily` | boolean | 否 | `true` | 按天切分（按 `logTimezone` 的零点） |
+| `logRotateIntervalMs` | number | 否 | `60000` | 切分检查间隔（毫秒）；`0` 关闭定时切分 |
+| `logRetentionMaxFiles` | number | 否 | `10` | 每个 stream 最多保留的归档数；`0` 不限 |
+| `logRetentionDays` | number | 否 | `30` | 归档最长保留天数（按文件修改时间）；`0` 不限 |
+| `logCompress` | boolean | 否 | `true` | 归档 gzip 压缩为 `.log.gz` |
+| `loadSampleIntervalMs` | number | 否 | `5000` | 负载采样间隔（毫秒）：PM2 进程指标 + 网关请求指标；`0` 关闭采样 |
+| `loadHistoryMinutes` | number | 否 | `10` | 每个应用在内存中保留的负载历史时长（分钟），SSE 连接时回放 |
 | `logRetentionMaxRows` | number | 否 | `10000` | 预留：日志行保留上限 |
 | `sqlPath` | string | 否 | `'sql'` | 相对 `server/` 的 SQL 目录名 |
 | `migrateBeforeStart` | boolean | 否 | `false` | 为 true 且版本含迁移时，启动前执行 SQL |
@@ -90,7 +98,7 @@
 |--------|------|------|------|
 | name | string | 是 | 应用 slug |
 | env | object | 是 | patch：`null` 删键；secret 键值为 `********` 时保持原值 |
-| secretEnvKeys | array | 否 | 显式密钥键名；传入则整体替换并写入 `options.secretEnvKeys`（仅保留仍存在于 env 的键）；省略则沿用原列表 |
+| secretEnvKeys | array | 否 | 新增的显式密钥键名，与原列表合并写入 `options.secretEnvKeys`（仅保留仍存在于 env 的键）。密钥类型不可撤销，只有删除该变量才会移出列表 |
 
 > **关键设计**：密钥判定 = 键名匹配 `secretEnvKeyPattern` **或** 出现在 `options.secretEnvKeys`。响应顶层 `secretEnvKeys` 为二者并集，便于管理端把普通变量标成密钥而不改键名。
 
@@ -98,7 +106,7 @@
 
 解析后的应用库：应用 `env` 的 `DB_*` 优先，否则注入 `defaultAppDb`。共享库（未自配 `DB_*`）仅能操作 `options.ownedTables`。
 
-> **关键设计**：共享库启动时注入 `DB_TABLE_PREFIX=t_{appName}_`（可用应用 env 覆盖）。子应用若使用 `@kne/fastify-sequelize@>=4.0.4`，存在该环境变量时默认 `forcePrefix`，连接上所有模型（含 account/message/tenant）表名必须以该前缀开头，无法被 `addModels({ prefix })` 覆盖。就绪后按该前缀自动认领表。
+> **关键设计**：共享库启动时注入 `DB_TABLE_PREFIX=t_{appName}_`，由系统写回应用 env 并维护：所有返回 env 的接口都不包含该键，`save` / `save-env` / `create` 传入的该键（含 `null` 删除）一律忽略。子应用若使用 `@kne/fastify-sequelize@>=4.0.4`，存在该环境变量时默认 `forcePrefix`，连接上所有模型（含 account/message/tenant）表名必须以该前缀开头，无法被 `addModels({ prefix })` 覆盖。就绪后按该前缀自动认领表。
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -270,25 +278,81 @@
 
 #### GET `{prefix}/app/logs`
 
-读取日志文件尾部分页（较新页在前）。`perPage` 上限 100。停止实时后前端可用 `beforeLine` 向上滚动加载更早日志。
+读取日志文件尾部分页（较新页在前）。`perPage` 上限 100。停止实时后前端可用 `beforeLine` 向上滚动加载更早日志。传 `file` 时读取指定归档（含 `.log.gz`），否则读当前 `stream` 文件。
 
 | 参数名 | 类型 | 必填 | 默认值 | 说明 |
 |--------|------|------|--------|------|
 | name | string | 是 | - | 应用 slug |
 | stream | string | 否 | `'out'` | `out` / `err` |
+| file | string | 否 | - | 日志文件名（来自 `logs/files`）；优先于 `stream`；非法名返回 400，不存在返回 404 |
 | perPage | number | 否 | `100` | 每页行数（最大 100） |
 | currentPage | number | 否 | `1` | 页码（1=最新一页；与 `beforeLine` 二选一） |
 | beforeLine | number | 否 | - | 取行号 `< beforeLine` 的尾部至多 `perPage` 行（上滚历史） |
+
+返回（行首 PM2 时间前缀已换算到 `logTimezone`）：
+
+```json
+{
+  "pageData": [{ "line": 12, "content": "2026-10-08T18:30:00: ..." }],
+  "totalCount": 12,
+  "hasMore": true
+}
+```
+
+#### GET `{prefix}/app/logs/files`
+
+列出应用 `logs/` 下的当前文件与归档，当前文件在前，归档按修改时间倒序。
+
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| name | string | 是 | 应用 slug |
 
 返回：
 
 ```json
 {
-  "pageData": [{ "line": 12, "content": "..." }],
-  "totalCount": 12,
-  "hasMore": true
+  "pageData": [
+    { "fileName": "out.log", "stream": "out", "size": 1024, "compressed": false, "current": true, "mtime": "2026-10-08T18:30:00+08:00" },
+    { "fileName": "out-20261007-000012.log.gz", "stream": "out", "size": 20480, "compressed": true, "current": false, "mtime": "2026-10-08T00:00:40+08:00" }
+  ],
+  "totalCount": 2
 }
 ```
+
+#### GET `{prefix}/app/logs/download`
+
+流式下载日志文件，`Content-Disposition: attachment; filename="{name}-{file}"`；`.gz` 为 `application/gzip`，其余为 `text/plain`。
+
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| name | string | 是 | 应用 slug |
+| file | string | 是 | 日志文件名 |
+
+> **注意**：下载内容为磁盘原始文件，行首时间前缀是 PM2 守护进程所在服务器的时区，未做 `logTimezone` 换算。
+
+> **大文件**：服务端按 `stat` 时的大小设置 `Content-Length` 并流式输出，正在追加的当前日志只下载到请求时刻的长度。前端应使用浏览器原生下载（`<a href>` 导航，鉴权 token 走 query，与 SSE 一致），不要 `fetch` 后转 Blob，以免整个文件读进内存。
+
+#### GET `{prefix}/app/logs/download-zip`
+
+将多个日志文件流式打包为一个 zip 下载，`Content-Disposition: attachment; filename="{name}-logs-{YYYYMMDD-HHmmss}.zip"`（时间戳按 `logTimezone`）。`.gz` 归档原样存入（不二次压缩），其余文件 deflate 压缩；当前日志只打包到请求时刻的长度。响应为 chunked，无 `Content-Length`。
+
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| name | string | 是 | 应用 slug |
+| files | string[] | 是 | 日志文件名，query 中重复传参：`files=a&files=b`；1～100 个，重复项去重 |
+
+任一文件名非法返回 400，不存在返回 404。前端同样用原生 `<a href>` 下载，token 走 query。
+
+#### POST `{prefix}/app/logs/remove`
+
+删除选中的日志归档。
+
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| name | string | 是 | 应用 slug |
+| files | array | 是 | 归档文件名列表（至少 1 个）；含当前文件 `out.log` / `err.log` 或非法名时整体返回 400 |
+
+返回 `{ "removed": ["out-20261007-000012.log.gz"] }`（已不存在的文件不计入）。
 
 #### GET `{prefix}/app/logs/stream`
 
@@ -305,7 +369,60 @@ SSE 实时日志。连接时先回放最近 `sseReplayLines` 行，再订阅 `lo
 
 ```text
 event: log
-data: {"appName":"demo","stream":"out","content":"...","line":1}
+data: {"appName":"demo","stream":"out","content":"2026-10-08T18:30:00: ...","line":1,"loggedAt":"2026-10-08T18:30:00+08:00"}
+```
+
+实时事件的 `content` 前缀与 `loggedAt` 均按 `logTimezone` 输出；`line` 取当前文件行数，PM2 落盘略晚于 bus 时可能偏小 1 行。
+
+#### GET `{prefix}/app/load`
+
+应用当前负载与内存中的最近历史（最多 `loadHistoryMinutes` 分钟，旧在前）。
+
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| name | string | 是 | 应用 slug；不存在返回 404 |
+
+返回：
+
+```json
+{
+  "intervalMs": 5000,
+  "current": { "name": "demo", "ts": 1791456603533, "sampledAt": "2026-10-08T18:50:03+08:00", "status": "online", "cpu": 7.5, "memory": 52428800, "instances": 1, "pids": [4321], "uptime": 65061, "restarts": 2, "requests": { "qps": 0.8, "rpm": 48, "avgRt": 14, "p95": 18, "p99": 18, "errorRate": 0.25, "errors5xx": 1, "upstreamErrors": 0, "concurrency": 0, "peakConcurrency": 1 } },
+  "pageData": []
+}
+```
+
+样本字段：
+
+| 字段 | 说明 |
+|------|------|
+| `ts` / `sampledAt` | 采样时间：毫秒时间戳 / 按 `logTimezone` 的 ISO 字符串 |
+| `status` | PM2 状态；任一实例 `online` 即为 `online`；PM2 中无该进程时为 `offline` |
+| `cpu` / `memory` | 各实例 CPU% 之和 / RSS 字节之和 |
+| `instances` / `pids` | PM2 实例数 / 在线实例 pid |
+| `uptime` | 最早在线实例的运行时长（毫秒），不在线为 `0` |
+| `restarts` | 各实例 PM2 重启次数之和（累计值） |
+| `requests.qps` | 本采样周期请求数 / 周期秒数 |
+| `requests.rpm` | 最近 60 秒请求数折算到每分钟 |
+| `requests.avgRt` / `p95` / `p99` | 最近 60 秒响应时间（毫秒），无请求时为 `null`；分位数为对数分桶近似（误差约 5%） |
+| `requests.errorRate` | 最近 60 秒 5xx 数 / 请求数，无请求时为 `null` |
+| `requests.errors5xx` / `upstreamErrors` | 本周期 5xx 次数 / 上游连接失败、超时、重置次数（后者同时计入 5xx） |
+| `requests.concurrency` / `peakConcurrency` | 采样时刻在途请求数 / 本周期在途峰值 |
+
+#### GET `{prefix}/app/load/stream`
+
+SSE 实时负载。连接时先推送一次 `history`，之后每次采样推送 `load`。
+
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| name | string | 是 | 应用 slug |
+
+```text
+event: history
+data: {"intervalMs":5000,"pageData":[{...}]}
+
+event: load
+data: {"name":"demo","ts":1791456608533,...}
 ```
 
 ### 程序化 API
@@ -328,10 +445,17 @@ data: {"appName":"demo","stream":"out","content":"...","line":1}
 | `syncStatus({ name, recoverIfMissing? })` | 同步单个应用真实状态并返回公开对象 |
 | `syncAllStatuses({ recoverIfMissing? })` | 批量同步（父应用启动 reconcile 使用） |
 | `remove({ name, exportBeforeRemove?, cleanupData?, ... })` | 删除；默认可导出+清理所属表 |
-| `logs({ name, stream, perPage, currentPage })` | 读日志文件 |
+| `logs({ name, stream, file?, perPage, currentPage, beforeLine? })` | 读当前日志或指定归档 |
+| `logFiles({ name })` | 列出日志文件 |
+| `resolveAppLogFile({ name, file })` | 校验并返回 `{ path, fileName, size, compressed }`（下载用） |
+| `resolveAppLogFiles({ name, files })` | 批量校验（去重），返回 `{ name, files: [{ path, fileName, size, mtime, compressed }] }`（打包下载用） |
+| `removeLogFiles({ name, files })` | 删除归档，返回 `{ removed }` |
+| `load({ name })` | 返回 `{ intervalMs, current, pageData }` |
+| `getLoadStore()` | 负载环形缓冲：`history(name)` / `latest(name)` / `emitter`（事件 `load:{name}`） |
 | `findByHost(host, { running? })` | 网关：按 domain 查找；默认只查 `running`，`running: false` 时不限状态 |
 | `findByPathName(name, { running? })` | 网关：按 name 查找；默认只查 `running`，`running: false` 时不限状态 |
-| `appendAppLog(appName, stream, content)` | 追加日志并 emit hub 事件 |
+| `appendAppLog(appName, stream, content)` | 管理端主动写入：追加到当前日志文件并 emit hub 事件 |
+| `emitAppLog(appName, stream, content)` | 只 emit hub 事件（PM2 bus 日志用，不写文件） |
 | `readLastLines(name, stream, n)` | SSE 回放用 |
 | `getLogHub()` | 获取 EventEmitter |
 | `toPublicApp(app)` / `mountPrefix(name)` | 序列化辅助 |
@@ -359,8 +483,10 @@ data: {"appName":"demo","stream":"out","content":"...","line":1}
 
 | 方法签名 | 说明 |
 |----------|------|
-| `onReady()` | 连接 PM2、挂 log bus，并 **setImmediate** 异步 `reconcile`（不阻塞父应用 ready） |
-| `onClose()` | 断开 bus / PM2（由插件 `onClose` 调用） |
+| `onReady()` | 连接 PM2、挂 log bus、启动日志切分与负载采样定时器，并 **setImmediate** 异步 `reconcile`、一次 `rotateLogs` 与一次 `sampleLoad`（不阻塞父应用 ready） |
+| `onClose()` | 停止切分与采样定时器并等待进行中的任务，断开 bus / PM2（由插件 `onClose` 调用） |
+| `rotateLogs({ now? })` | 立即执行一轮切分 + 压缩 + 保留清理；返回本轮切分的 `[{ name, stream, fileName, reason }]`，`reason` 为 `size` / `daily` |
+| `sampleLoad({ now? })` | 立即采样一轮：每个应用一条样本写入负载缓冲并推送 SSE，返回样本数组；PM2 未连接时返回 `[]` |
 | `reconcile()` | 调用 `app.syncAllStatuses({ recoverIfMissing: true })`：按 PM2 真实状态写回 DB；`running`/`deploying` 且进程缺失时尝试拉起 |
 
 ### 数据模型
@@ -415,6 +541,46 @@ data: {"appName":"demo","stream":"out","content":"...","line":1}
 | Location | 相对路径前缀补上 `/app/{name}` |
 | Set-Cookie | `Path=/` 改为 `Path=/app/{name}` |
 | Body | 对文本类 Content-Type，将 `"/static/`、`"/api/`、`"/account/` 等前缀改写；有 `content-encoding` 时跳过 |
+
+#### 日志切分与归档
+
+```
+PM2 守护进程 ──(out_file / error_file)──→ logs/out.log、err.log
+      └──(bus log:out / log:err)──→ logHub ──→ SSE
+定时器（每 logRotateIntervalMs）
+  ↓ size >= logMaxSize 或 跨天（logTimezone）
+rename 为 {stream}-{起始时间}.log ──→ pm2 reloadLogs ──→ gzip ──→ 保留清理
+```
+
+| 机制 | 说明 |
+|------|------|
+| 写入者 | 仅 PM2 写日志文件；bus 只推 SSE，不再重复落盘 |
+| 切分条件 | 文件非空且 `size >= logMaxSize`，或 `logRotateDaily` 下文件起始日期早于今天（按 `logTimezone`） |
+| 起始时间 | 记录在 `logs/.rotate-state.json`，切分后更新为当前时间；缺失时用文件创建时间，不可用则用修改时间 |
+| 归档命名 | `{stream}-YYYYMMDD-HHmmss.log[.gz]`，时间为该文件起始时间（`logTimezone`）；重名追加 `-1`、`-2` |
+| 不丢日志 | rename 后 PM2 仍写原 inode（即归档），`reloadLogs` 重开新文件后才压缩 |
+| 保留 | 每个 stream 按修改时间倒序保留 `logRetentionMaxFiles` 个，且删除超过 `logRetentionDays` 天的归档 |
+| 读取 | 当前文件从末尾分块反向读取，行数增量缓存；`.gz` 流式解压按行号区间读取 |
+
+> **时区**：PM2 `time: true` 的行前缀由守护进程按服务器本地时区生成（无偏移，全局共享无法单独设置）。读取接口与 SSE 识别 `YYYY-MM-DDTHH:mm:ss: ` 前缀并换算为 `logTimezone`；磁盘文件与下载内容不改写。换算假设守护进程与宿主进程时区一致。
+
+#### 负载与请求指标
+
+```
+网关 proxyToApp ──begin / finish──→ requestMetrics（每应用：在途数 + 当前周期直方图）
+定时器（每 loadSampleIntervalMs）
+  pm2.list ──汇总同名实例──┐
+  requestMetrics.snapshot ─┴→ 样本 ──→ loadStore 环形缓冲 ──→ SSE load:{name}
+```
+
+| 机制 | 说明 |
+|------|------|
+| 进程指标 | 来自 `pm2.list` 的 `monit` 与 `pm2_env`；不随访问量变化，应用不在 PM2 中时推送 `offline` 样本 |
+| 统计范围 | 仅经网关反代的请求（域名与 `/app/{name}` 两种）；应用未运行时网关返回的 503/404 状态页、直连 `127.0.0.1:{port}` 的请求（含健康检查）不统计；WebSocket 不经网关 |
+| 响应时间 | 网关收到请求到响应发送完毕（或客户端断开），包含应用处理与传输时间 |
+| 内存 | 每应用每周期最多约 230 个直方图桶，与请求量无关；历史只在内存，宿主重启后清空 |
+| 多进程 | 宿主多进程部署时各进程分别统计，接口只返回当前进程的数据 |
+| 异常 | fork 模式下 PM2 不上报应用内异常；以 `upstreamErrors`（连不上 / 超时）与 `errors5xx` 作为网关侧异常指标 |
 
 #### 包校验与安全
 

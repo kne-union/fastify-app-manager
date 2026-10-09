@@ -3,10 +3,12 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const fs = require('fs-extra');
 const portPool = require('../utils/portPool');
-const { mergeEnv, maskEnvForResponse, applyEnvPatch, mergePm2Config, normalizeSecretKeys, collectSecretKeys } = require('../utils/env');
+const { mergeEnv, maskEnvForResponse, applyEnvPatch, mergePm2Config, normalizeSecretKeys, collectSecretKeys, isSystemEnvKey, omitSystemEnv } = require('../utils/env');
 const { prepareVersionArtifact } = require('../utils/version');
 const { injectEntryHtml } = require('../utils/entryInject');
-const { ensureLogFiles, readLogTail, readLastLines, appendLog } = require('../utils/logFiles');
+const { ensureLogFiles, readLogTail, readLastLines, appendLog, countLines } = require('../utils/logFiles');
+const { currentFileName, isCurrentFileName, resolveLogFile, listLogFiles } = require('../utils/logRotate');
+const { toIsoInTz, convertLogText } = require('../utils/logTime');
 const { runSqlMigrations, MIGRATION_ACTIONS } = require('../utils/migrate');
 const { listSqlFiles } = require('../utils/validatePackage');
 const pm2Util = require('../utils/pm2');
@@ -116,7 +118,7 @@ module.exports = fp(async (fastify, options) => {
       domain: domain || null,
       icon: icon || null,
       description: description || null,
-      env: env || {},
+      env: omitSystemEnv(env),
       pm2Config: pm2Config || {},
       options: normalizedOptions,
       port,
@@ -150,7 +152,7 @@ module.exports = fp(async (fastify, options) => {
     }
     if (patch.options && patch.options.secretEnvKeys !== undefined) {
       patch.options = Object.assign({}, patch.options, {
-        secretEnvKeys: normalizeSecretKeys(patch.options.secretEnvKeys)
+        secretEnvKeys: normalizeSecretKeys([...resolveSecretEnvKeys(app), ...patch.options.secretEnvKeys])
       });
     }
     if (category !== undefined) {
@@ -165,10 +167,10 @@ module.exports = fp(async (fastify, options) => {
 
   const saveEnv = async ({ name, env, secretEnvKeys: nextSecretKeys } = {}) => {
     const app = await getByName(name);
-    const currentSecrets = resolveSecretEnvKeys(app);
-    const secretEnvKeys = nextSecretKeys !== undefined ? normalizeSecretKeys(nextSecretKeys) : currentSecrets;
+    // 密钥类型不可撤销，只随变量删除而移除
+    const secretEnvKeys = normalizeSecretKeys([...resolveSecretEnvKeys(app), ...(nextSecretKeys || [])]);
     const nextEnv = applyEnvPatch(app.env || {}, env || {}, Object.assign({}, options, { secretEnvKeys }));
-    const cleanedSecrets = secretEnvKeys.filter(key => Object.prototype.hasOwnProperty.call(nextEnv, key));
+    const cleanedSecrets = secretEnvKeys.filter(key => !isSystemEnvKey(key) && Object.prototype.hasOwnProperty.call(nextEnv, key));
     await app.update({
       env: nextEnv,
       options: Object.assign({}, app.options || {}, { secretEnvKeys: cleanedSecrets })
@@ -671,10 +673,103 @@ module.exports = fp(async (fastify, options) => {
     };
   };
 
-  const logs = async ({ name, stream = 'out', perPage = 100, currentPage = 1, beforeLine } = {}) => {
+  const logsDirOf = app => path.join(app.rootPath, 'logs');
+  const currentLogFile = (app, stream) => path.join(logsDirOf(app), currentFileName(stream));
+
+  const resolveExistingLogFile = async (app, fileName) => {
+    let filePath;
+    try {
+      filePath = resolveLogFile(logsDirOf(app), fileName);
+    } catch (e) {
+      httpError(400, e.message);
+    }
+    if (!(await fs.pathExists(filePath))) {
+      httpError(404, `log file ${fileName} not found`);
+    }
+    return filePath;
+  };
+
+  const logs = async ({ name, stream = 'out', file, perPage = 100, currentPage = 1, beforeLine } = {}) => {
     const app = await getByName(name);
-    const file = path.join(app.rootPath, 'logs', stream === 'err' ? 'err.log' : 'out.log');
-    return readLogTail(file, { perPage, currentPage, beforeLine });
+    const filePath = file ? await resolveExistingLogFile(app, file) : currentLogFile(app, stream);
+    return readLogTail(filePath, { perPage, currentPage, beforeLine, timezone: options.logTimezone });
+  };
+
+  const logFiles = async ({ name }) => {
+    const app = await getByName(name);
+    const pageData = (await listLogFiles(logsDirOf(app))).map(item => Object.assign({}, item, { mtime: toIsoInTz(item.mtime, options.logTimezone) }));
+    return { pageData, totalCount: pageData.length };
+  };
+
+  const resolveAppLogFile = async ({ name, file }) => {
+    const app = await getByName(name);
+    const filePath = await resolveExistingLogFile(app, file);
+    const { size } = await fs.stat(filePath);
+    return { path: filePath, fileName: file, size, compressed: file.endsWith('.gz') };
+  };
+
+  const resolveAppLogFiles = async ({ name, files = [] }) => {
+    const app = await getByName(name);
+    const items = [];
+    for (const fileName of Array.from(new Set(files))) {
+      const filePath = await resolveExistingLogFile(app, fileName);
+      const { size, mtime } = await fs.stat(filePath);
+      items.push({ path: filePath, fileName, size, mtime, compressed: fileName.endsWith('.gz') });
+    }
+    return { name: app.name, files: items };
+  };
+
+  const removeLogFiles = async ({ name, files = [] }) => {
+    const app = await getByName(name);
+    const targets = [];
+    for (const fileName of files) {
+      if (isCurrentFileName(fileName)) {
+        httpError(400, `cannot remove current log file ${fileName}`);
+      }
+      try {
+        targets.push({ fileName, filePath: resolveLogFile(logsDirOf(app), fileName) });
+      } catch (e) {
+        httpError(400, e.message);
+      }
+    }
+    const removed = [];
+    for (const { fileName, filePath } of targets) {
+      if (await fs.pathExists(filePath)) {
+        await fs.remove(filePath);
+        removed.push(fileName);
+      }
+    }
+    return { removed };
+  };
+
+  const getLoadStore = () => fastify[options.name].loadStore;
+
+  const load = async ({ name }) => {
+    const app = await getByName(name);
+    const store = getLoadStore();
+    return {
+      intervalMs: options.loadSampleIntervalMs > 0 ? options.loadSampleIntervalMs : 0,
+      current: store ? store.latest(app.name) : null,
+      pageData: store ? store.history(app.name) : []
+    };
+  };
+
+  const emitAppLog = async (appName, stream, content) => {
+    const hub = getLogHub();
+    if (!hub) {
+      return;
+    }
+    const app = await models.app.findOne({ where: { name: appName } });
+    if (!app) {
+      return;
+    }
+    hub.emit(`log:${appName}`, {
+      appName,
+      stream,
+      content: convertLogText(content, options.logTimezone),
+      line: await countLines(currentLogFile(app, stream)),
+      loggedAt: toIsoInTz(new Date(), options.logTimezone)
+    });
   };
 
   const findByHost = async (host, { running = true } = {}) => {
@@ -707,34 +802,29 @@ module.exports = fp(async (fastify, options) => {
       syncAllStatuses,
       remove,
       logs,
+      logFiles,
+      resolveAppLogFile,
+      resolveAppLogFiles,
+      removeLogFiles,
+      load,
+      getLoadStore,
       toPublicApp,
       mountPrefix,
       findByHost,
       findByPathName,
       readLastLines: async (name, stream, n) => {
         const app = await getByName(name);
-        const file = path.join(app.rootPath, 'logs', stream === 'err' ? 'err.log' : 'out.log');
-        return readLastLines(file, n);
+        return readLastLines(currentLogFile(app, stream), n, { timezone: options.logTimezone });
       },
       getLogHub,
+      emitAppLog,
       appendAppLog: async (appName, stream, content) => {
         const app = await models.app.findOne({ where: { name: appName } });
         if (!app) {
           return;
         }
-        const file = path.join(app.rootPath, 'logs', stream === 'err' ? 'err.log' : 'out.log');
-        await appendLog(file, content);
-        const hub = getLogHub();
-        if (hub) {
-          const { totalCount } = await readLogTail(file, { perPage: 1, currentPage: 1 });
-          hub.emit(`log:${appName}`, {
-            appName,
-            stream,
-            content,
-            line: totalCount,
-            loggedAt: new Date().toISOString()
-          });
-        }
+        await appendLog(currentLogFile(app, stream), content);
+        await emitAppLog(appName, stream, content);
       }
     }
   });

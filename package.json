@@ -1,6 +1,6 @@
 {
   "name": "@kne/fastify-app-manager",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Fastify 单机应用市场插件：版本上传、PM2 托管、路径/域名反代与日志 SSE",
   "main": "index.js",
   "scripts": {
@@ -73,6 +73,7 @@
     "jsdom": "^29.1.1",
     "lodash": "^4.18.1",
     "pm2": "^7.0.4",
-    "sequelize": "^6.37.7"
+    "sequelize": "^6.37.7",
+    "yazl": "^3.3.1"
   }
 }

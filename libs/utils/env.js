@@ -105,10 +105,17 @@ const isSecretKey = (key, pattern, secretKeys = []) => {
   return isPatternSecretKey(key, pattern);
 };
 
+// 由系统写入维护：不在接口中返回，也不接受外部新增 / 修改 / 删除
+const SYSTEM_ENV_KEYS = ['DB_TABLE_PREFIX'];
+
+const isSystemEnvKey = key => SYSTEM_ENV_KEYS.includes(key);
+
+const omitSystemEnv = (appEnv = {}) => Object.fromEntries(Object.entries(appEnv || {}).filter(([key]) => !isSystemEnvKey(key)));
+
 const maskEnvForResponse = (appEnv = {}, { secretEnvKeyPattern, secretEnvKeys = [] } = {}) => {
   const masked = {};
   const explicit = normalizeSecretKeys(secretEnvKeys);
-  for (const [key, value] of Object.entries(appEnv || {})) {
+  for (const [key, value] of Object.entries(omitSystemEnv(appEnv))) {
     if (isSecretKey(key, secretEnvKeyPattern, explicit)) {
       masked[key] = value == null || value === '' ? null : SECRET_MASK;
     } else {
@@ -128,6 +135,9 @@ const applyEnvPatch = (current = {}, patch = {}, { secretEnvKeyPattern, secretEn
   const next = Object.assign({}, current);
   const explicit = normalizeSecretKeys(secretEnvKeys);
   for (const [key, value] of Object.entries(patch || {})) {
+    if (isSystemEnvKey(key)) {
+      continue;
+    }
     if (value === null) {
       delete next[key];
       continue;
@@ -146,7 +156,7 @@ const applyEnvPatch = (current = {}, patch = {}, { secretEnvKeyPattern, secretEn
 const collectSecretKeys = (appEnv = {}, { secretEnvKeyPattern, secretEnvKeys = [] } = {}) => {
   const explicit = normalizeSecretKeys(secretEnvKeys);
   const fromPattern = Object.keys(appEnv || {}).filter(key => isPatternSecretKey(key, secretEnvKeyPattern));
-  return normalizeSecretKeys([...explicit, ...fromPattern]);
+  return normalizeSecretKeys([...explicit, ...fromPattern]).filter(key => !isSystemEnvKey(key));
 };
 
 const PM2_CONFIG_KEYS = ['exec_mode', 'instances', 'autorestart', 'max_memory_restart', 'max_restarts', 'min_uptime', 'kill_timeout', 'merge_logs'];
@@ -171,6 +181,9 @@ module.exports = {
   mergeEnv,
   isPatternSecretKey,
   isSecretKey,
+  SYSTEM_ENV_KEYS,
+  isSystemEnvKey,
+  omitSystemEnv,
   maskEnvForResponse,
   applyEnvPatch,
   collectSecretKeys,

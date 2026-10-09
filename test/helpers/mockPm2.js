@@ -22,7 +22,9 @@ const createMockPm2 = () => {
     start: (opts, cb) => {
       store.set(opts.name, {
         name: opts.name,
-        pm2_env: { status: 'online', ...opts }
+        pid: 40000 + store.size,
+        monit: { cpu: 0, memory: 0 },
+        pm2_env: { status: 'online', pm_uptime: Date.now(), restart_time: 0, ...opts }
       });
       cb(null, [store.get(opts.name)]);
     },
@@ -41,6 +43,11 @@ const createMockPm2 = () => {
       cb(null);
     },
     list: cb => cb(null, [...store.values()]),
+    reloadLogs: cb => {
+      api.__reloadLogsCount += 1;
+      cb(null);
+    },
+    __reloadLogsCount: 0,
     __store: store,
     __bus: bus
   };

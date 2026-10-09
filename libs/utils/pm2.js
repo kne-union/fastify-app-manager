@@ -82,6 +82,12 @@ const launchBus = () =>
     pm2.launchBus((err, bus) => (err ? reject(err) : resolve(bus)));
   });
 
+// Reopens out_file/error_file for every PM2 process; needed after renaming log files.
+const reloadLogs = () =>
+  new Promise((resolve, reject) => {
+    pm2.reloadLogs(err => (err ? reject(err) : resolve()));
+  });
+
 module.exports = {
   connect,
   disconnect,
@@ -92,5 +98,6 @@ module.exports = {
   restartApp,
   list,
   launchBus,
+  reloadLogs,
   raw: pm2
 };
