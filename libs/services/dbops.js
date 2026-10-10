@@ -4,7 +4,7 @@ const fs = require('fs-extra');
 const AdmZip = require('adm-zip');
 const { createSequelizeFromEnv, SQL_MIGRATIONS_TABLE } = require('../utils/migrate');
 const { resolveAppDbEnv, hasAppDbConfig } = require('../utils/env');
-const { resolveDbScope, normalizeOwnedTables, isSystemTable, resolveTablePrefix } = require('../utils/dbIdentity');
+const { resolveDbScope, normalizeOwnedTables, isSystemTable, resolveTablePrefix, filterOwnedTables } = require('../utils/dbIdentity');
 const { assertReadOnlyQuerySql } = require('../utils/sqlQueryGuard');
 
 module.exports = fp(async (fastify, options) => {
@@ -83,15 +83,7 @@ module.exports = fp(async (fastify, options) => {
     return { table, columns, primaryKey };
   };
 
-  const getOwnedTables = (app, allTables) => {
-    const scope = resolveDbScope(app.env || {}, app.options || {});
-    const existing = new Set(allTables);
-    if (scope === 'dedicated') {
-      return allTables.filter(t => !isSystemTable(t));
-    }
-    const owned = normalizeOwnedTables(app.options?.ownedTables);
-    return owned.filter(t => existing.has(t));
-  };
+  const getOwnedTables = (app, allTables) => filterOwnedTables({ appEnv: app.env || {}, ownedTables: app.options?.ownedTables, allTables });
 
   const assertTableOwned = (app, allTables, table) => {
     const owned = getOwnedTables(app, allTables);

@@ -45,6 +45,27 @@ module.exports = fp(async (fastify, options) => {
     }
     return category.code ? { code: category.code, name: category.name || category.code } : null;
   };
+  // 应用入口：label + 相对应用根的 path；去空、补前导 /、按 path 去重
+  const normalizeEntries = entries => {
+    const seen = new Set();
+    return (Array.isArray(entries) ? entries : []).reduce((result, item) => {
+      const label = String(item?.label || '').trim();
+      const rawPath = String(item?.path || '').trim();
+      if (!label || !rawPath) {
+        return result;
+      }
+      const entryPath = rawPath.startsWith('/') ? rawPath : `/${rawPath}`;
+      if (!seen.has(entryPath)) {
+        seen.add(entryPath);
+        result.push({ label, path: entryPath });
+      }
+      return result;
+    }, []);
+  };
+  const resolveEntries = appLike => {
+    const base = mountPrefix(appLike.name);
+    return normalizeEntries(appLike.options?.entries).map(entry => Object.assign({}, entry, { url: `${base}${entry.path}` }));
+  };
 
   const toPublicApp = app => {
     if (!app) {
@@ -59,6 +80,7 @@ module.exports = fp(async (fastify, options) => {
     json.pathUrl = `${mountPrefix(json.name)}/`;
     json.category = json.options?.category || null;
     json.isPublic = isAppPublic(json);
+    json.entries = resolveEntries(json);
     return json;
   };
 
@@ -71,7 +93,7 @@ module.exports = fp(async (fastify, options) => {
   };
 
   const create = async data => {
-    const { name, label, domain, icon, description, category, isPublic, env, pm2Config, options: appOptions } = data;
+    const { name, label, domain, icon, description, category, isPublic, entries, env, pm2Config, options: appOptions } = data;
     if (!name || !NAME_RE.test(name)) {
       httpError(400, 'invalid name: use lowercase slug [a-z0-9-]');
     }
@@ -111,6 +133,9 @@ module.exports = fp(async (fastify, options) => {
     if (isPublic !== undefined) {
       normalizedOptions.isPublic = !!isPublic;
     }
+    if (entries !== undefined) {
+      normalizedOptions.entries = normalizeEntries(entries);
+    }
 
     const app = await models.app.create({
       name,
@@ -118,7 +143,7 @@ module.exports = fp(async (fastify, options) => {
       domain: domain || null,
       icon: icon || null,
       description: description || null,
-      env: omitSystemEnv(env),
+      env: omitSystemEnv(env, options.systemEnvKeys),
       pm2Config: pm2Config || {},
       options: normalizedOptions,
       port,
@@ -130,7 +155,7 @@ module.exports = fp(async (fastify, options) => {
     return toPublicApp(app);
   };
 
-  const save = async ({ name, category, isPublic, ...data }) => {
+  const save = async ({ name, category, isPublic, entries, ...data }) => {
     const app = await getByName(name);
     const omit = ['name', 'port', 'rootPath', 'pm2Name', 'status', 'currentVersionId'];
     const patch = {};
@@ -161,6 +186,9 @@ module.exports = fp(async (fastify, options) => {
     if (isPublic !== undefined) {
       patch.options = Object.assign({}, patch.options || app.options || {}, { isPublic: !!isPublic });
     }
+    if (entries !== undefined) {
+      patch.options = Object.assign({}, patch.options || app.options || {}, { entries: normalizeEntries(entries) });
+    }
     await app.update(patch);
     return toPublicApp(app);
   };
@@ -170,7 +198,7 @@ module.exports = fp(async (fastify, options) => {
     // 密钥类型不可撤销，只随变量删除而移除
     const secretEnvKeys = normalizeSecretKeys([...resolveSecretEnvKeys(app), ...(nextSecretKeys || [])]);
     const nextEnv = applyEnvPatch(app.env || {}, env || {}, Object.assign({}, options, { secretEnvKeys }));
-    const cleanedSecrets = secretEnvKeys.filter(key => !isSystemEnvKey(key) && Object.prototype.hasOwnProperty.call(nextEnv, key));
+    const cleanedSecrets = secretEnvKeys.filter(key => !isSystemEnvKey(key, options.systemEnvKeys) && Object.prototype.hasOwnProperty.call(nextEnv, key));
     await app.update({
       env: nextEnv,
       options: Object.assign({}, app.options || {}, { secretEnvKeys: cleanedSecrets })
@@ -211,7 +239,8 @@ module.exports = fp(async (fastify, options) => {
         description: app.description,
         category: app.options?.category || null,
         isPublic: isAppPublic(app),
-        pathUrl: `${mountPrefix(app.name)}/`
+        pathUrl: `${mountPrefix(app.name)}/`,
+        entries: resolveEntries(app)
       }));
     return { pageData, totalCount: pageData.length };
   };
@@ -480,6 +509,26 @@ module.exports = fp(async (fastify, options) => {
       await app.reload();
     }
 
+    if (typeof options.resolveSystemEnv === 'function') {
+      const systemEnv = await options.resolveSystemEnv({ app, version, serverDir });
+      if (systemEnv && typeof systemEnv === 'object') {
+        const persisted = {};
+        for (const [key, value] of Object.entries(systemEnv)) {
+          if (value == null) {
+            continue;
+          }
+          env[key] = String(value);
+          if ((options.systemEnvKeys || []).includes(key) && app.env?.[key] !== env[key]) {
+            persisted[key] = env[key];
+          }
+        }
+        if (Object.keys(persisted).length) {
+          await app.update({ env: Object.assign({}, app.env || {}, persisted) });
+          await app.reload();
+        }
+      }
+    }
+
     const pathBase = mountPrefix(app.name);
     // Domain-first: inject `/` so custom Host SPA works; path mode then relies on gateway rewrite fallback.
     // Path-only: inject `/app/{name}` so runtime* matches strip-prefix gateway.
@@ -663,9 +712,17 @@ module.exports = fp(async (fastify, options) => {
       }
     }
 
+    const snapshot = app.toJSON();
     await models.appVersion.destroy({ where: { appName: name } });
     await fs.remove(app.rootPath).catch(() => {});
     await app.destroy();
+    if (typeof options.onAppRemoved === 'function') {
+      try {
+        await options.onAppRemoved({ app: snapshot });
+      } catch (e) {
+        fastify.log.warn({ err: e, appName: name }, 'onAppRemoved hook failed');
+      }
+    }
     return {
       removed: true,
       export: exportResult,

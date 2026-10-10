@@ -23,6 +23,22 @@ const hasAppDbConfig = (appEnv = {}) => {
   return !!appEnv.DB_DATABASE;
 };
 
+const DB_DEDICATED_KEY = 'DB_DEDICATED';
+const DB_CONNECTION_KEYS = ['DB_DIALECT', 'DB_HOST', 'DB_PORT', 'DB_DATABASE', 'DB_USERNAME', 'DB_PASSWORD', 'DB_STORAGE'];
+
+// 配好独立库后默认启用；DB_DEDICATED=false 时保留配置但回落共享库
+const isAppDbEnabled = (appEnv = {}) =>
+  hasAppDbConfig(appEnv) &&
+  String(appEnv[DB_DEDICATED_KEY] ?? '')
+    .trim()
+    .toLowerCase() !== 'false';
+
+const omitDbConnection = (appEnv = {}) => {
+  const next = Object.assign({}, appEnv);
+  DB_CONNECTION_KEYS.forEach(key => delete next[key]);
+  return next;
+};
+
 const buildDefaultAppDbEnv = (defaultAppDb = {}) => {
   const dialect = defaultAppDb.dialect || 'sqlite';
   const env = { DB_DIALECT: dialect };
@@ -59,10 +75,11 @@ const buildDefaultAppDbEnv = (defaultAppDb = {}) => {
  */
 const resolveAppDbEnv = ({ passthroughEnvKeys = [], appEnv = {}, defaultAppDb = null, port = null, includePort = false, appName = null, injectTablePrefix = true } = {}) => {
   const base = Object.assign({}, pickHostEnv(passthroughEnvKeys));
-  if (defaultAppDb && !hasAppDbConfig(appEnv)) {
+  const useAppDb = isAppDbEnabled(appEnv || {});
+  if (defaultAppDb && !useAppDb) {
     Object.assign(base, buildDefaultAppDbEnv(defaultAppDb));
   }
-  Object.assign(base, appEnv || {});
+  Object.assign(base, useAppDb ? appEnv || {} : omitDbConnection(appEnv || {}));
   if (includePort && port != null) {
     base.PORT = String(port);
   }
@@ -105,17 +122,17 @@ const isSecretKey = (key, pattern, secretKeys = []) => {
   return isPatternSecretKey(key, pattern);
 };
 
-// 由系统写入维护：不在接口中返回，也不接受外部新增 / 修改 / 删除
+// 由系统写入维护：不在接口中返回，也不接受外部新增 / 修改 / 删除；宿主可通过 systemEnvKeys 选项追加
 const SYSTEM_ENV_KEYS = ['DB_TABLE_PREFIX'];
 
-const isSystemEnvKey = key => SYSTEM_ENV_KEYS.includes(key);
+const isSystemEnvKey = (key, systemEnvKeys = []) => SYSTEM_ENV_KEYS.includes(key) || (systemEnvKeys || []).includes(key);
 
-const omitSystemEnv = (appEnv = {}) => Object.fromEntries(Object.entries(appEnv || {}).filter(([key]) => !isSystemEnvKey(key)));
+const omitSystemEnv = (appEnv = {}, systemEnvKeys = []) => Object.fromEntries(Object.entries(appEnv || {}).filter(([key]) => !isSystemEnvKey(key, systemEnvKeys)));
 
-const maskEnvForResponse = (appEnv = {}, { secretEnvKeyPattern, secretEnvKeys = [] } = {}) => {
+const maskEnvForResponse = (appEnv = {}, { secretEnvKeyPattern, secretEnvKeys = [], systemEnvKeys = [] } = {}) => {
   const masked = {};
   const explicit = normalizeSecretKeys(secretEnvKeys);
-  for (const [key, value] of Object.entries(omitSystemEnv(appEnv))) {
+  for (const [key, value] of Object.entries(omitSystemEnv(appEnv, systemEnvKeys))) {
     if (isSecretKey(key, secretEnvKeyPattern, explicit)) {
       masked[key] = value == null || value === '' ? null : SECRET_MASK;
     } else {
@@ -131,11 +148,11 @@ const maskEnvForResponse = (appEnv = {}, { secretEnvKeyPattern, secretEnvKeys = 
  * SECRET_MASK => keep existing (when key is secret by pattern or explicit list)
  * other => set
  */
-const applyEnvPatch = (current = {}, patch = {}, { secretEnvKeyPattern, secretEnvKeys = [] } = {}) => {
+const applyEnvPatch = (current = {}, patch = {}, { secretEnvKeyPattern, secretEnvKeys = [], systemEnvKeys = [] } = {}) => {
   const next = Object.assign({}, current);
   const explicit = normalizeSecretKeys(secretEnvKeys);
   for (const [key, value] of Object.entries(patch || {})) {
-    if (isSystemEnvKey(key)) {
+    if (isSystemEnvKey(key, systemEnvKeys)) {
       continue;
     }
     if (value === null) {
@@ -153,10 +170,10 @@ const applyEnvPatch = (current = {}, patch = {}, { secretEnvKeyPattern, secretEn
 /**
  * 响应中的密钥键列表 = 显式列表 ∪ 当前 env 中匹配 pattern 的键
  */
-const collectSecretKeys = (appEnv = {}, { secretEnvKeyPattern, secretEnvKeys = [] } = {}) => {
+const collectSecretKeys = (appEnv = {}, { secretEnvKeyPattern, secretEnvKeys = [], systemEnvKeys = [] } = {}) => {
   const explicit = normalizeSecretKeys(secretEnvKeys);
   const fromPattern = Object.keys(appEnv || {}).filter(key => isPatternSecretKey(key, secretEnvKeyPattern));
-  return normalizeSecretKeys([...explicit, ...fromPattern]).filter(key => !isSystemEnvKey(key));
+  return normalizeSecretKeys([...explicit, ...fromPattern]).filter(key => !isSystemEnvKey(key, systemEnvKeys));
 };
 
 const PM2_CONFIG_KEYS = ['exec_mode', 'instances', 'autorestart', 'max_memory_restart', 'max_restarts', 'min_uptime', 'kill_timeout', 'merge_logs'];
@@ -176,6 +193,8 @@ module.exports = {
   normalizeSecretKeys,
   pickHostEnv,
   hasAppDbConfig,
+  DB_DEDICATED_KEY,
+  isAppDbEnabled,
   buildDefaultAppDbEnv,
   resolveAppDbEnv,
   mergeEnv,
