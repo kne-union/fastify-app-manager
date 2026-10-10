@@ -4,7 +4,7 @@
 
 适用场景：内网/堡垒机上的业务应用集中托管；不负责多机编排、硬磁盘配额或 WebSocket 升级。
 
-> **关键设计**：子应用前端通过部署时注入的 `runtimePublicUrl` / `runtimeApiUrl` 感知对外前缀；网关对路径模式剥前缀反代，并改写 Location / Cookie / 文本 body 兜底。Scheme B（子进程挂 `APP_BASE_PATH`）已弃用。
+> **关键设计**：子应用前端通过部署时注入的 `runtimePublicUrl` / `runtimeApiUrl` 感知对外前缀；网关对路径模式剥前缀反代，并改写 Location / Cookie / 文本 body 兜底（JS 脚本不改写，避免与 runtimeApiUrl 重复拼前缀）。Scheme B（子进程挂 `APP_BASE_PATH`）已弃用。
 >
 > **存储隔离**：同时注入 `window.__LOCAL_STORAGE_PREFIX="<应用名>"`，`@kne/local-storage`（≥0.1.2，`@kne/token-storage` 底层依赖）读到后自动给 key 加 `<应用名>:` 前缀，避免同源挂载的子应用与宿主、其它子应用互相覆盖登录 token 等本地存储。
 
@@ -88,7 +88,7 @@ deploy(versionId)
 | `save-env` patch | `null` 删除键；`********` 对 secret 键表示保持原值 |
 | 显式密钥 | 存于 `options.secretEnvKeys`；`save-env` 可传 `secretEnvKeys` 将普通键标为密钥；响应顶层回传合并后的键名列表（不含明文） |
 | 默认托管库 | `defaultAppDb`（默认 `appsRoot/_shared/apps-data.sqlite`），与宿主主库强制分离；应用未配 `DB_*` 时注入 |
-| 应用自有库 | 应用 `env` 含完整 `DB_*` 时为独享库（`dbScope=dedicated`） |
+| 应用自有库 | 应用 `env` 含完整 `DB_*` 且 `DB_DEDICATED` 不为 `false` 时为独享库（`dbScope=dedicated`）；`DB_DEDICATED=false` 保留配置但回落共享库。`dbScope` 始终由 env 推导，与启动注入的连接一致；独享库若带 `DB_TABLE_PREFIX`（与其它系统共用库）只认该前缀的表 |
 | 共享库表前缀 | 启动时注入 `DB_TABLE_PREFIX=t_{appName}_` 并由系统写回应用 env（接口不返回、不可修改）；子应用 sequelize 须读取该变量建表 |
 | 表归属 | `options.ownedTables`；共享库启动就绪后按前缀自动认领，亦可 `sync-owned` 扫描；运维仅限归属表 |
 

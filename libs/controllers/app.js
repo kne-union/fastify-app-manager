@@ -26,6 +26,10 @@ module.exports = fp(async (fastify, options) => {
             description: { type: 'string' },
             category: { type: ['object', 'string', 'null'] },
             isPublic: { type: 'boolean' },
+            entries: {
+              type: ['array', 'null'],
+              items: { type: 'object', properties: { label: { type: 'string' }, path: { type: 'string' } } }
+            },
             env: { type: 'object' },
             pm2Config: { type: 'object' },
             options: { type: 'object' }
@@ -53,6 +57,10 @@ module.exports = fp(async (fastify, options) => {
             description: { type: 'string' },
             category: { type: ['object', 'string', 'null'] },
             isPublic: { type: 'boolean' },
+            entries: {
+              type: ['array', 'null'],
+              items: { type: 'object', properties: { label: { type: 'string' }, path: { type: 'string' } } }
+            },
             env: { type: 'object' },
             pm2Config: { type: 'object' },
             options: { type: 'object' }

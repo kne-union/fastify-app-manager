@@ -1,6 +1,6 @@
 const fp = require('fastify-plugin');
 const { Readable } = require('node:stream');
-const { rewriteLocation, rewriteSetCookiePath, shouldRewriteBody, rewriteBody } = require('../utils/pathRewrite');
+const { rewriteLocation, rewriteSetCookiePath, shouldRewriteBody, rewriteBody, tagEtag, restoreConditionalHeaders } = require('../utils/pathRewrite');
 const { wantsHtml, renderUnavailablePage, getStatusText } = require('../utils/unavailablePage');
 
 module.exports = fp(async (fastify, options) => {
@@ -41,13 +41,16 @@ module.exports = fp(async (fastify, options) => {
         reply.send(error);
       },
       rewriteRequestHeaders: (req, headers) => {
-        const next = { ...headers };
+        const next = stripPrefix ? restoreConditionalHeaders(headers) : { ...headers };
         delete next['content-length'];
         return next;
       },
       rewriteHeaders: headers => {
         const next = { ...headers };
         if (stripPrefix) {
+          if (next.etag) {
+            next.etag = tagEtag(next.etag);
+          }
           if (next.location) {
             next.location = rewriteLocation(next.location, mountPrefix);
           }

@@ -22,7 +22,7 @@ npm i --save @kne/fastify-app-manager
 
 适用场景：内网/堡垒机上的业务应用集中托管；不负责多机编排、硬磁盘配额或 WebSocket 升级。
 
-> **关键设计**：子应用前端通过部署时注入的 `runtimePublicUrl` / `runtimeApiUrl` 感知对外前缀；网关对路径模式剥前缀反代，并改写 Location / Cookie / 文本 body 兜底。Scheme B（子进程挂 `APP_BASE_PATH`）已弃用。
+> **关键设计**：子应用前端通过部署时注入的 `runtimePublicUrl` / `runtimeApiUrl` 感知对外前缀；网关对路径模式剥前缀反代，并改写 Location / Cookie / 文本 body 兜底（JS 脚本不改写，避免与 runtimeApiUrl 重复拼前缀）。Scheme B（子进程挂 `APP_BASE_PATH`）已弃用。
 >
 > **存储隔离**：同时注入 `window.__LOCAL_STORAGE_PREFIX="<应用名>"`，`@kne/local-storage`（≥0.1.2，`@kne/token-storage` 底层依赖）读到后自动给 key 加 `<应用名>:` 前缀，避免同源挂载的子应用与宿主、其它子应用互相覆盖登录 token 等本地存储。
 
@@ -106,7 +106,7 @@ deploy(versionId)
 | `save-env` patch | `null` 删除键；`********` 对 secret 键表示保持原值 |
 | 显式密钥 | 存于 `options.secretEnvKeys`；`save-env` 可传 `secretEnvKeys` 将普通键标为密钥；响应顶层回传合并后的键名列表（不含明文） |
 | 默认托管库 | `defaultAppDb`（默认 `appsRoot/_shared/apps-data.sqlite`），与宿主主库强制分离；应用未配 `DB_*` 时注入 |
-| 应用自有库 | 应用 `env` 含完整 `DB_*` 时为独享库（`dbScope=dedicated`） |
+| 应用自有库 | 应用 `env` 含完整 `DB_*` 且 `DB_DEDICATED` 不为 `false` 时为独享库（`dbScope=dedicated`）；`DB_DEDICATED=false` 保留配置但回落共享库。`dbScope` 始终由 env 推导，与启动注入的连接一致；独享库若带 `DB_TABLE_PREFIX`（与其它系统共用库）只认该前缀的表 |
 | 共享库表前缀 | 启动时注入 `DB_TABLE_PREFIX=t_{appName}_` 并由系统写回应用 env（接口不返回、不可修改）；子应用 sequelize 须读取该变量建表 |
 | 表归属 | `options.ownedTables`；共享库启动就绪后按前缀自动认领，亦可 `sync-owned` 扫描；运维仅限归属表 |
 
@@ -191,6 +191,9 @@ await fastify.listen({ port: 3000 });
 | `pathPrefix` | string | 否 | `'/app'` | 路径访问前缀（无尾斜杠亦可） |
 | `passthroughEnvKeys` | array | 否 | `[]` | 允许注入子进程的宿主 env 键名 |
 | `secretEnvKeyPattern` | RegExp | 否 | `/(SECRET\|PASSWORD\|TOKEN\|KEY\|PRIVATE)/i` | 按键名正则脱敏；与显式 `secretEnvKeys` 取并集 |
+| `systemEnvKeys` | array | 否 | `[]` | 宿主维护的系统变量键名，与内置 `DB_TABLE_PREFIX` 合并：接口不返回，create / save / saveEnv 不可新增、修改或删除 |
+| `resolveSystemEnv` | function | 否 | `null` | `async ({ app, version, serverDir }) => env \| null`，每次启动进程（deploy / start / restart / 恢复）前调用；返回值覆盖应用变量注入子进程，值为 `null` / `undefined` 的键忽略，属于 `systemEnvKeys` 的键持久化到 `app.env` |
+| `onAppRemoved` | function | 否 | `null` | `async ({ app }) => void`，应用删除成功后调用，`app` 为删除前快照（含 `env`）；数据清理未完成而未删除时不调用，钩子报错只记 warn 日志 |
 | `defaultAppDb` | object | 否 | `appsRoot/_shared/apps-data.sqlite` | 托管应用默认库（须与宿主主库分离） |
 | `dbQueryMaxRows` | number | 否 | `500` | 只读 query SQL 最大返回行数 |
 | `pm2Defaults` | object | 否 | 见下表 | 全局 PM2 默认；可被应用 `pm2Config` 覆盖 |
@@ -253,11 +256,12 @@ await fastify.listen({ port: 3000 });
 | description | string | 否 | - | 描述 |
 | category | object / string | 否 | - | 应用分类（应用中心分组用），写入 `options.category`；推荐传 fastify-group 分组对象，对象只保留 `{ code, name }`，字符串原样保存 |
 | isPublic | boolean | 否 | `true` | 是否在公开应用中心展示，写入 `options.isPublic`；未设置视为公开 |
+| entries | array | 否 | `[]` | 应用入口 `[{ label, path }]`，写入 `options.entries`；`path` 相对应用根（缺前导 `/` 自动补），缺 `label` 或 `path` 的项丢弃，同 `path` 只保留第一项 |
 | env | object | 否 | `{}` | 应用自有环境变量 |
 | pm2Config | object | 否 | `{}` | PM2 覆盖项 |
 | options | object | 否 | `{}` | 扩展字段；可含 `secretEnvKeys: string[]` 显式密钥键名 |
 
-返回脱敏后的应用对象（含 `port`、`pathUrl`、`category`、`passthroughEnvKeys`、`secretEnvKeys`、`status: 'idle'` 等）。
+返回脱敏后的应用对象（含 `port`、`pathUrl`、`category`、`entries`（每项附 `url` = 挂载前缀 + `path`）、`passthroughEnvKeys`、`secretEnvKeys`、`status: 'idle'` 等）。
 
 ##### POST `{prefix}/app/save`
 
@@ -269,6 +273,7 @@ await fastify.listen({ port: 3000 });
 | label / domain / icon / description / env / pm2Config / options | - | 否 | 传入的字段才更新；`env` 按 patch 语义合并 |
 | category | object / string / null | 否 | 合并写入 `options.category`（对象只保留 `{ code, name }`），不影响 `options` 其它键；传空值清除分类 |
 | isPublic | boolean | 否 | 合并写入 `options.isPublic`，不影响 `options` 其它键 |
+| entries | array / null | 否 | 整体替换 `options.entries`（规则同创建），不影响 `options` 其它键；传 `[]` / `null` 清空入口 |
 
 ##### POST `{prefix}/app/save-env`
 
@@ -426,7 +431,11 @@ await fastify.listen({ port: 3000 });
       "description": "d",
       "category": { "code": "tools", "name": "工具" },
       "isPublic": true,
-      "pathUrl": "/app/demo/"
+      "pathUrl": "/app/demo/",
+      "entries": [
+        { "label": "PC", "path": "/", "url": "/app/demo/" },
+        { "label": "移动端", "path": "/mobile", "url": "/app/demo/mobile" }
+      ]
     }
   ],
   "totalCount": 1
@@ -685,7 +694,7 @@ data: {"name":"demo","ts":1791456608533,...}
 | description | string / null | 描述 |
 | env | object | 自有环境变量 |
 | pm2Config | object | PM2 覆盖 |
-| options | object | 扩展字段；`secretEnvKeys` 为显式密钥键名列表，`category` 为应用分类，`isPublic` 为是否公开（未设置视为公开） |
+| options | object | 扩展字段；`secretEnvKeys` 为显式密钥键名列表，`category` 为应用分类，`isPublic` 为是否公开（未设置视为公开），`entries` 为应用入口 `[{ label, path }]` |
 | port | number | 分配端口 |
 | status | string | `idle` / `deploying` / `running` / `stopped` / `error` |
 | currentVersionId | string / null | 当前部署版本 id |
@@ -775,7 +784,7 @@ rename 为 {stream}-{起始时间}.log ──→ pm2 reloadLogs ──→ gzip �
 ##### 环境合并顺序
 
 ```
-pickHostEnv(passthroughEnvKeys) → app.env → PORT=分配端口（强制）
+pickHostEnv(passthroughEnvKeys) → app.env → PORT=分配端口（强制） → resolveSystemEnv 返回值（覆盖）
 ```
 
 API 响应脱敏：`secretEnvKeyPattern` ∪ `options.secretEnvKeys`；明文密钥不回传，顶层 `secretEnvKeys` 只暴露键名。

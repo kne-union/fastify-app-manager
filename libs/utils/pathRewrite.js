@@ -27,9 +27,11 @@ const rewriteSetCookiePath = (setCookie, mountPrefix) => {
   });
 };
 
-const TEXTUAL_TYPES = /text\/|javascript|json|xml|svg/i;
+const TEXTUAL_TYPES = /text\/|json|xml|svg/i;
+// 前端脚本已按注入的 runtimePublicUrl / runtimeApiUrl 自行拼前缀（如 axios baseURL + '/api/...'），再改写会得到 /app/x/app/x/api
+const SCRIPT_TYPES = /javascript|ecmascript/i;
 
-const shouldRewriteBody = contentType => TEXTUAL_TYPES.test(contentType || '');
+const shouldRewriteBody = contentType => TEXTUAL_TYPES.test(contentType || '') && !SCRIPT_TYPES.test(contentType || '');
 
 const rewriteBody = (body, mountPrefix, prefixes = ['/static', '/api', '/account']) => {
   if (!body || !mountPrefix) {
@@ -47,9 +49,32 @@ const rewriteBody = (body, mountPrefix, prefixes = ['/static', '/api', '/account
   return text;
 };
 
+// 路径模式响应体经网关改写，ETag 带上改写规则版本，与子应用原始文件及旧规则下的缓存区分；改写规则变化时递增
+const ETAG_SUFFIX = '-gw2';
+
+const tagEtag = etag => (typeof etag === 'string' && etag.endsWith('"') ? `${etag.slice(0, -1)}${ETAG_SUFFIX}"` : etag);
+
+// 只有本网关签发的 ETag 才还原后交给子应用协商缓存；其它（旧规则缓存）去掉条件头，强制返回完整内容
+const restoreConditionalHeaders = headers => {
+  const next = { ...headers };
+  const tags = String(next['if-none-match'] || '')
+    .split(',')
+    .map(tag => tag.trim())
+    .filter(Boolean);
+  if (tags.length && tags.every(tag => tag.endsWith(`${ETAG_SUFFIX}"`))) {
+    next['if-none-match'] = tags.map(tag => `${tag.slice(0, -(ETAG_SUFFIX.length + 1))}"`).join(', ');
+  } else {
+    delete next['if-none-match'];
+    delete next['if-modified-since'];
+  }
+  return next;
+};
+
 module.exports = {
   rewriteLocation,
   rewriteSetCookiePath,
   shouldRewriteBody,
-  rewriteBody
+  rewriteBody,
+  tagEtag,
+  restoreConditionalHeaders
 };

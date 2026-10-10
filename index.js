@@ -36,6 +36,12 @@ module.exports = fp(
         loadSampleIntervalMs: 5000,
         loadHistoryMinutes: 10,
         passthroughEnvKeys: [],
+        /** 宿主维护的系统变量：接口不返回、不可外部修改，resolveSystemEnv 返回的同名键会持久化 */
+        systemEnvKeys: [],
+        /** async ({ app, version, serverDir }) => env | null，每次启动进程前调用，返回值覆盖应用变量 */
+        resolveSystemEnv: null,
+        /** async ({ app }) => void，应用删除成功后调用，app 为删除前快照；报错只记日志 */
+        onAppRemoved: null,
         secretEnvKeyPattern: /(SECRET|PASSWORD|TOKEN|KEY|PRIVATE)/i,
         sqlPath: 'sql',
         migrateBeforeStart: false,

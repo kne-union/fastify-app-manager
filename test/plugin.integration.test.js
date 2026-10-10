@@ -213,6 +213,26 @@ describe('plugin integration', function () {
 
     expect(categorized.json().isPublic).to.equal(true);
 
+    const withEntries = await fastify.inject({
+      method: 'POST',
+      url: '/api/v1/app-manager/app/save',
+      payload: {
+        name: 'demo',
+        entries: [
+          { label: 'PC', path: '/' },
+          { label: '移动端', path: 'mobile' },
+          { label: '重复', path: '/mobile' },
+          { label: '', path: '/empty-label' },
+          { label: '无路径', path: '  ' }
+        ]
+      }
+    });
+    expect(withEntries.json().entries).to.deep.equal([
+      { label: 'PC', path: '/', url: '/app/demo/' },
+      { label: '移动端', path: '/mobile', url: '/app/demo/mobile' }
+    ]);
+    expect(withEntries.json().category).to.deep.equal({ code: 'tools', name: '工具' });
+
     const createdWithCategory = await fastify.inject({
       method: 'POST',
       url: '/api/v1/app-manager/app/create',
@@ -235,8 +255,13 @@ describe('plugin integration', function () {
       description: 'd',
       category: { code: 'tools', name: '工具' },
       isPublic: true,
-      pathUrl: '/app/demo/'
+      pathUrl: '/app/demo/',
+      entries: [
+        { label: 'PC', path: '/', url: '/app/demo/' },
+        { label: '移动端', path: '/mobile', url: '/app/demo/mobile' }
+      ]
     });
+    expect(center.json().pageData.find(i => i.name === 'demo-social').entries).to.deep.equal([]);
 
     const publicCenter = await fastify.inject({ method: 'GET', url: '/api/v1/app-manager/app/center/public-list' });
     expect(publicCenter.json().pageData.map(i => i.name)).to.deep.equal(['demo']);

@@ -1,5 +1,5 @@
 const path = require('node:path');
-const { hasAppDbConfig } = require('./env');
+const { isAppDbEnabled } = require('./env');
 
 const SYSTEM_TABLES = new Set(['_fs_sql_migrations']);
 
@@ -69,12 +69,8 @@ const assertDefaultAppDbSeparated = (defaultAppDb, hostSequelize) => {
   }
 };
 
-const resolveDbScope = (appEnv = {}, options = {}) => {
-  if (options.dbScope === 'dedicated' || options.dbScope === 'shared') {
-    return options.dbScope;
-  }
-  return hasAppDbConfig(appEnv) ? 'dedicated' : 'shared';
-};
+// 与 startProcess 注入的连接一致：只看 env（独立库配置 + DB_DEDICATED 开关）。options.dbScope 只是认领表时写入的缓存，env 变化后会过期
+const resolveDbScope = (appEnv = {}) => (isAppDbEnabled(appEnv) ? 'dedicated' : 'shared');
 
 const normalizeOwnedTables = tables => [...new Set((Array.isArray(tables) ? tables : []).map(t => String(t || '').trim()).filter(Boolean))];
 
@@ -104,8 +100,21 @@ const resolveTablePrefix = (appName, appEnv = {}) => {
   return buildTablePrefix(appName);
 };
 
+/**
+ * 共享库：只认登记过的表；独立库：库内业务表全归本应用，但显式配了 DB_TABLE_PREFIX 说明该库与其它系统共用，只认本前缀的表
+ */
+const filterOwnedTables = ({ appEnv = {}, ownedTables, allTables = [] }) => {
+  if (resolveDbScope(appEnv) === 'dedicated') {
+    const prefix = String(appEnv.DB_TABLE_PREFIX || '').trim();
+    return allTables.filter(t => !isSystemTable(t) && (!prefix || String(t).startsWith(prefix)));
+  }
+  const existing = new Set(allTables);
+  return normalizeOwnedTables(ownedTables).filter(t => existing.has(t));
+};
+
 module.exports = {
   SYSTEM_TABLES,
+  filterOwnedTables,
   fingerprintDbConfig,
   fingerprintFromEnv,
   assertDefaultAppDbSeparated,

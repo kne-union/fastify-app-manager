@@ -3,11 +3,11 @@ const path = require('node:path');
 const fs = require('fs-extra');
 const os = require('node:os');
 const { mergeEnv, maskEnvForResponse, applyEnvPatch, SECRET_MASK, normalizeSecretKeys, collectSecretKeys, hasAppDbConfig, buildDefaultAppDbEnv, resolveAppDbEnv } = require('../libs/utils/env');
-const { assertDefaultAppDbSeparated, resolveDbScope, buildTablePrefix } = require('../libs/utils/dbIdentity');
+const { assertDefaultAppDbSeparated, resolveDbScope, buildTablePrefix, filterOwnedTables } = require('../libs/utils/dbIdentity');
 const { assertReadOnlyQuerySql } = require('../libs/utils/sqlQueryGuard');
 const { validatePackageRoot } = require('../libs/utils/validatePackage');
 const { isPathInside } = require('../libs/utils/zip');
-const { rewriteLocation, rewriteSetCookiePath, rewriteBody } = require('../libs/utils/pathRewrite');
+const { rewriteLocation, rewriteSetCookiePath, rewriteBody, shouldRewriteBody, tagEtag, restoreConditionalHeaders } = require('../libs/utils/pathRewrite');
 const { injectEntryHtml } = require('../libs/utils/entryInject');
 const { allocate } = require('../libs/utils/portPool');
 
@@ -56,6 +56,15 @@ describe('@kne/fastify-app-manager', function () {
       expect(collectSecretKeys({}, { secretEnvKeys: ['DB_TABLE_PREFIX', 'X'] })).to.deep.equal(['X']);
     });
 
+    it('should hide and protect host defined system env keys', () => {
+      const opts = { systemEnvKeys: ['OIDC_CLIENT_ID'] };
+      expect(maskEnvForResponse({ OIDC_CLIENT_ID: 'c', NAME: 'a' }, opts)).to.deep.equal({ NAME: 'a' });
+      expect(applyEnvPatch({ OIDC_CLIENT_ID: 'c' }, { OIDC_CLIENT_ID: 'x', NAME: 'a' }, opts)).to.deep.equal({ OIDC_CLIENT_ID: 'c', NAME: 'a' });
+      expect(applyEnvPatch({ OIDC_CLIENT_ID: 'c' }, { OIDC_CLIENT_ID: null }, opts)).to.deep.equal({ OIDC_CLIENT_ID: 'c' });
+      expect(collectSecretKeys({}, { secretEnvKeys: ['OIDC_CLIENT_ID', 'X'], systemEnvKeys: ['OIDC_CLIENT_ID'] })).to.deep.equal(['X']);
+      expect(maskEnvForResponse({ OIDC_CLIENT_ID: 'c' }, {})).to.deep.equal({ OIDC_CLIENT_ID: 'c' });
+    });
+
     it('should inject defaultAppDb when app has no DB config', () => {
       expect(hasAppDbConfig({})).to.equal(false);
       expect(hasAppDbConfig({ DB_DIALECT: 'sqlite', DB_STORAGE: '/tmp/a.db' })).to.equal(true);
@@ -76,6 +85,34 @@ describe('@kne/fastify-app-manager', function () {
       expect(dedicated.DB_STORAGE).to.equal('/tmp/app.db');
       expect(resolveDbScope({ DB_DIALECT: 'sqlite', DB_STORAGE: '/tmp/app.db' })).to.equal('dedicated');
       expect(resolveDbScope({})).to.equal('shared');
+    });
+
+    it('should follow env db config over stale options.dbScope', () => {
+      const env = { DB_DIALECT: 'postgres', DB_HOST: '10.0.0.1', DB_DATABASE: 'app' };
+      expect(resolveDbScope(env, { dbScope: 'shared' })).to.equal('dedicated');
+      expect(resolveDbScope({}, { dbScope: 'dedicated' })).to.equal('shared');
+    });
+
+    it('should fall back to shared db when DB_DEDICATED=false', () => {
+      const appEnv = { DB_DIALECT: 'postgres', DB_HOST: '10.0.0.1', DB_DATABASE: 'own', DB_PASSWORD: 'p', DB_DEDICATED: 'false', FOO: 'bar' };
+      const defaultAppDb = { dialect: 'postgres', host: 'shared-host', database: 'shared' };
+      expect(resolveDbScope(appEnv)).to.equal('shared');
+      const env = resolveAppDbEnv({ appEnv, defaultAppDb, appName: 'demo' });
+      expect(env.DB_HOST).to.equal('shared-host');
+      expect(env.DB_DATABASE).to.equal('shared');
+      expect(env.DB_PASSWORD).to.equal(undefined);
+      expect(env.DB_TABLE_PREFIX).to.equal('t_demo_');
+      expect(env.FOO).to.equal('bar');
+      expect(resolveDbScope(Object.assign({}, appEnv, { DB_DEDICATED: 'true' }))).to.equal('dedicated');
+      expect(resolveAppDbEnv({ appEnv: Object.assign({}, appEnv, { DB_DEDICATED: 'true' }), defaultAppDb }).DB_DATABASE).to.equal('own');
+    });
+
+    it('should only own prefixed tables in a dedicated db shared with other systems', () => {
+      const allTables = ['t_talent_saas_user', 't_talent_saas_tenant', 't_account_user', 't_tenant_user', '_fs_sql_migrations'];
+      const env = { DB_DIALECT: 'postgres', DB_HOST: '10.0.0.1', DB_DATABASE: 'app' };
+      expect(filterOwnedTables({ appEnv: Object.assign({ DB_TABLE_PREFIX: 't_talent_saas_' }, env), allTables })).to.deep.equal(['t_talent_saas_user', 't_talent_saas_tenant']);
+      expect(filterOwnedTables({ appEnv: env, allTables })).to.deep.equal(['t_talent_saas_user', 't_talent_saas_tenant', 't_account_user', 't_tenant_user']);
+      expect(filterOwnedTables({ appEnv: {}, ownedTables: ['t_account_user', 'missing'], allTables })).to.deep.equal(['t_account_user']);
     });
 
     it('should inject DB_TABLE_PREFIX for shared apps by name', () => {
@@ -127,6 +164,30 @@ describe('@kne/fastify-app-manager', function () {
       const out = rewriteBody('"/static/js/a.js" and "/api/v1/x"', '/app/demo');
       expect(out).to.include('"/app/demo/static/js/a.js"');
       expect(out).to.include('"/app/demo/api/v1/x"');
+    });
+
+    it('should not rewrite script bodies', () => {
+      expect(shouldRewriteBody('application/javascript; charset=utf-8')).to.equal(false);
+      expect(shouldRewriteBody('text/javascript')).to.equal(false);
+      expect(shouldRewriteBody('text/html; charset=utf-8')).to.equal(true);
+      expect(shouldRewriteBody('application/json')).to.equal(true);
+    });
+
+    it('should version etags and drop conditional headers from stale caches', () => {
+      const tagged = tagEtag('W/"9006-abc"');
+      expect(tagged).to.not.equal('W/"9006-abc"');
+
+      const restored = restoreConditionalHeaders({ 'if-none-match': tagged, 'if-modified-since': 'x', accept: '*/*' });
+      expect(restored['if-none-match']).to.equal('W/"9006-abc"');
+      expect(restored['if-modified-since']).to.equal('x');
+
+      const stale = restoreConditionalHeaders({ 'if-none-match': 'W/"9006-abc"', 'if-modified-since': 'x', accept: '*/*' });
+      expect(stale).to.not.have.property('if-none-match');
+      expect(stale).to.not.have.property('if-modified-since');
+      expect(stale.accept).to.equal('*/*');
+
+      const onlyDate = restoreConditionalHeaders({ 'if-modified-since': 'x' });
+      expect(onlyDate).to.not.have.property('if-modified-since');
     });
   });
 
