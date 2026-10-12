@@ -42,6 +42,8 @@ module.exports = fp(
         resolveSystemEnv: null,
         /** async ({ app }) => void，应用删除成功后调用，app 为删除前快照；报错只记日志 */
         onAppRemoved: null,
+        /** async ({ fileId, name, version, request }) => Buffer，版本上传传 fileId 时读取宿主文件 */
+        resolveVersionFile: null,
         secretEnvKeyPattern: /(SECRET|PASSWORD|TOKEN|KEY|PRIVATE)/i,
         sqlPath: 'sql',
         migrateBeforeStart: false,

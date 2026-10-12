@@ -35,8 +35,28 @@ module.exports = fp(async (fastify, options) => {
     return models.app.findOne({ where: { pm2Name } });
   };
 
+  /** 宿主 sync() 不会给已有表加列：老库升级时补齐后续新增的可空列 */
+  const ensureSchema = async () => {
+    const { models } = fastify[options.name];
+    const model = models.appVersion;
+    const queryInterface = model.sequelize.getQueryInterface();
+    const table = model.getTableName();
+    const columns = await queryInterface.describeTable(table);
+    for (const name of ['fileId', 'migrationFiles']) {
+      const attr = model.rawAttributes[name];
+      if (!columns[attr.field]) {
+        await queryInterface.addColumn(table, attr.field, { type: attr.type, allowNull: true, comment: attr.comment });
+      }
+    }
+  };
+
   const onReady = async () => {
     await fsEnsureAppsRoot();
+    try {
+      await ensureSchema();
+    } catch (e) {
+      fastify.log.warn({ err: e }, 'ensure app-manager schema failed');
+    }
     try {
       await pm2Util.connect();
       connected = true;
@@ -87,9 +107,9 @@ module.exports = fp(async (fastify, options) => {
       loadTimer.unref?.();
     }
 
-    // 父应用重启后不阻塞 ready：后台按 PM2 真实状态异步对齐 DB
+    // 父应用重启后不阻塞 ready：后台按 PM2 真实状态对齐 DB，缺部署目录的应用另行补回后再拉起
     setImmediate(() => {
-      reconcile().catch(err => {
+      recoverOnStartup().catch(err => {
         fastify.log.warn({ err }, 'async reconcile/sync statuses failed');
       });
       rotateLogs().catch(err => fastify.log.warn({ err }, 'log rotation failed'));
@@ -103,12 +123,55 @@ module.exports = fp(async (fastify, options) => {
     await fs.ensureDir(options.appsRoot);
   };
 
-  const reconcile = async () => {
+  const reconcile = async ({ excludeIds } = {}) => {
     const { services } = fastify[options.name];
     if (typeof services.app.syncAllStatuses === 'function') {
-      return services.app.syncAllStatuses({ recoverIfMissing: true });
+      return services.app.syncAllStatuses({ recoverIfMissing: true, excludeIds });
     }
     return [];
+  };
+
+  /** 逐个补回缺失的部署目录（npm install 耗时），每补完一个就单独对齐状态并按需拉起 */
+  const restoreArtifacts = async missing => {
+    const { services } = fastify[options.name];
+    const results = [];
+    for (const item of missing) {
+      const result = await services.app.restoreArtifact(item);
+      results.push(result);
+      const { app } = item;
+      const wasActive = app.status === 'running' || app.status === 'deploying';
+      try {
+        const synced = await services.app.syncStatus({ name: app.name, recoverIfMissing: result.action === 'restored' && wasActive });
+        if (result.action !== 'restored' && wasActive && synced?.status !== 'running') {
+          await app.update({ status: 'error', message: `current version artifact missing: ${result.reason}` });
+        }
+      } catch (e) {
+        fastify.log.warn({ err: e, app: app.name }, 'sync status after artifact restore failed');
+      }
+    }
+    return results;
+  };
+
+  const recoverOnStartup = async () => {
+    const { services } = fastify[options.name];
+    const missing = await services.app.listMissingArtifacts();
+    // 两路并行：部署目录完好的应用不必等其它应用重装依赖
+    const [reconciled, restored] = await Promise.all([
+      reconcile({ excludeIds: missing.map(({ app }) => app.id) }).catch(err => {
+        fastify.log.warn({ err }, 'async reconcile/sync statuses failed');
+        return [];
+      }),
+      restoreArtifacts(missing).catch(err => {
+        fastify.log.warn({ err }, 'restore missing artifacts failed');
+        return [];
+      })
+    ]);
+    // 只保留当前版本目录，其余版本部署时再从宿主文件解压
+    const pruned = await services.app.pruneAllVersionArtifacts().catch(err => {
+      fastify.log.warn({ err }, 'prune version artifacts failed');
+      return [];
+    });
+    return { reconciled, restored, pruned };
   };
 
   const runRotation = async ({ now = new Date() } = {}) => {
@@ -244,6 +307,6 @@ module.exports = fp(async (fastify, options) => {
   };
 
   Object.assign(fastify[options.name].services, {
-    bootstrap: { onReady, onClose, reconcile, rotateLogs, sampleLoad }
+    bootstrap: { onReady, onClose, ensureSchema, recoverOnStartup, reconcile, rotateLogs, sampleLoad }
   });
 });

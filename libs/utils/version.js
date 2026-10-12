@@ -33,8 +33,10 @@ const runNpmInstall = (cwd, timeoutMs) =>
     });
   });
 
-const prepareVersionArtifact = async ({ zipBuffer, artifactPath, maxZipSize, maxZipEntries, npmInstallTimeoutMs, sqlPath }) => {
+/** install=false 时只解压校验，不装依赖（用于不常驻磁盘的版本上传） */
+const prepareVersionArtifact = async ({ zipBuffer, artifactPath, maxZipSize, maxZipEntries, npmInstallTimeoutMs, sqlPath, install = true, onProgress }) => {
   await fs.emptyDir(artifactPath);
+  onProgress && onProgress('extract');
   const extractDir = path.join(artifactPath, '_extract');
   await extractZipSafe(zipBuffer, extractDir, { maxZipSize, maxZipEntries });
   const packageRoot = await resolvePackageRoot(extractDir);
@@ -60,7 +62,10 @@ const prepareVersionArtifact = async ({ zipBuffer, artifactPath, maxZipSize, max
   });
 
   const serverDir = path.join(artifactPath, 'server');
-  await runNpmInstall(serverDir, npmInstallTimeoutMs);
+  if (install) {
+    onProgress && onProgress('install');
+    await runNpmInstall(serverDir, npmInstallTimeoutMs);
+  }
 
   const sqlDir = path.join(serverDir, sqlPath || 'sql');
   const sqlFiles = await listSqlFiles(sqlDir);

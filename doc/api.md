@@ -14,6 +14,7 @@
 | `systemEnvKeys` | array | 否 | `[]` | 宿主维护的系统变量键名，与内置 `DB_TABLE_PREFIX` 合并：接口不返回，create / save / saveEnv 不可新增、修改或删除 |
 | `resolveSystemEnv` | function | 否 | `null` | `async ({ app, version, serverDir }) => env \| null`，每次启动进程（deploy / start / restart / 恢复）前调用；返回值覆盖应用变量注入子进程，值为 `null` / `undefined` 的键忽略，属于 `systemEnvKeys` 的键持久化到 `app.env` |
 | `onAppRemoved` | function | 否 | `null` | `async ({ app }) => void`，应用删除成功后调用，`app` 为删除前快照（含 `env`）；数据清理未完成而未删除时不调用，钩子报错只记 warn 日志 |
+| `resolveVersionFile` | function | 否 | `null` | `async ({ fileId, name, version, request }) => Buffer`，版本上传传 `fileId`（而非 multipart 文件）时调用，返回 zip 内容；未配置时传 `fileId` 返回 400。版本记录保存 `fileId`；这类版本只在当前部署时常驻磁盘，部署非当前版本或启动时当前版本目录缺失会再次调用以重建 |
 | `defaultAppDb` | object | 否 | `appsRoot/_shared/apps-data.sqlite` | 托管应用默认库（须与宿主主库分离） |
 | `dbQueryMaxRows` | number | 否 | `500` | 只读 query SQL 最大返回行数 |
 | `pm2Defaults` | object | 否 | 见下表 | 全局 PM2 默认；可被应用 `pm2Config` 覆盖 |
@@ -143,16 +144,17 @@
 
 #### POST `{prefix}/app/version/upload`
 
-`multipart/form-data` 上传 zip。
+`multipart/form-data` 上传 zip；或 JSON 传 `fileId`，由 `resolveVersionFile` 读取宿主文件（如文件管理中已上传的 zip）。
 
 | 字段名 | 类型 | 必填 | 说明 |
 |--------|------|------|------|
-| file | file | 是 | zip 二进制（字段名任意 file part） |
+| file | file | 否 | zip 二进制（字段名任意 file part）；与 `fileId` 二选一，同时存在时以 `file` 为准 |
+| fileId | string | 否 | 宿主文件 id，交给 `resolveVersionFile` 读取；与 `file` 二选一 |
 | name | string | 是 | 应用 slug（须已 create） |
 | version | string | 是 | 版本号；同应用内唯一 |
 | label | string | 否 | 版本说明 |
 
-成功返回 `appVersion` 记录（含 `artifactPath`、`hasMigration` 等）。包在临时目录完成解压、校验与 `npm install` 后才写入版本表，上传中或失败的包不会出现在版本列表；包非法或 npm 失败时清理临时目录并返回 400。版本号已存在返回 409；同版本号仅残留软删除记录时会先彻底清除再写入。
+成功返回 `appVersion` 记录（含 `artifactPath`、`hasMigration`、`fileId`、`sqlFiles` 等）。包中 `server/{sqlPath}/*.sql` 的内容写入版本记录（数据库）。传 `fileId` 时只解压校验、不装依赖，也不保留版本目录（部署时再从宿主文件解压）；multipart 上传无处重建，解压并 `npm install` 后保留目录。包在临时目录处理完才写入版本表，上传中或失败的包不会出现在版本列表；包非法或 npm 失败时清理临时目录并返回 400。版本号已存在返回 409；同版本号仅残留软删除记录时会先彻底清除再写入。
 
 #### GET `{prefix}/app/version/list`
 
@@ -181,9 +183,20 @@
 
 `hasMigration` 为 true 时额外附带 `sqlFiles` 列表。
 
+#### GET `{prefix}/app/version/download`
+
+下载版本部署包，文件名 `{name}-{version}.zip`。
+
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| name | string | 是 | 应用 slug |
+| versionId | string | 是 | 版本 id；不属于该应用返回 404 |
+
+版本有 `fileId` 且配置了 `resolveVersionFile` 时返回原始 zip；否则（或读取失败时）由版本目录流式打包，排除部署时生成的 `server/node_modules` 与 `server/build`。版本目录也不存在时返回 404。
+
 #### POST `{prefix}/app/deploy`
 
-选择版本部署。立即返回 `deploying`，后台做健康检查。
+选择版本部署。版本目录不在磁盘时先经 `resolveVersionFile` 取回 zip 解压并 `npm install`（耗时，取不回返回 400 且不改应用状态），再以数据库中的 SQL 覆盖目录内 `.sql`；随后立即返回 `deploying`，后台做健康检查。进程启动后删除该应用其它有 `fileId` 的版本目录（只保留当前版本）。
 
 | 参数名 | 类型 | 必填 | 默认值 | 说明 |
 |--------|------|------|--------|------|
@@ -192,6 +205,7 @@
 | version | string | 否 | - | 版本号 |
 | runMigration | boolean | 否 | `true` | false 时向 app.env 写入 `RUN_SQL_ON_SYNC=false`；预跑 SQL 仍受 `migrateBeforeStart` 约束 |
 | migrations | array | 否 | - | `[{ name, action }]` 逐个指定**待执行**脚本的处理方式；未列出的按 `execute`。仅在 `runMigration` 且 `migrateBeforeStart` 时生效 |
+| progressId | string | 否 | 随机 UUID | 进度标识；前端先用它连 `GET .../app/deploy/stream` 再发起部署，可收到完整进度 |
 
 `migrations[].action`：
 
@@ -208,15 +222,47 @@
   "name": "demo",
   "status": "deploying",
   "versionId": "354173577374729216",
+  "progressId": "c0a8...",
   "port": 4001,
   "pathUrl": "/app/demo/",
   "domain": null
 }
 ```
 
+#### GET `{prefix}/app/deploy/stream`
+
+SSE 部署进度。连接时先推送 `snapshot`（该应用最近一次部署中匹配 `progressId` 的已有事件，便于断线重连），之后每个阶段变化推送 `progress`。每个应用只在内存中保留最近一次部署的事件。
+
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| name | string | 是 | 应用 slug |
+| progressId | string | 否 | 只推送该次部署的事件；不传则推送该应用所有部署事件 |
+
+阶段（`steps`，依次推进）：
+
+| step | 说明 | `detail`（`status=running` 时） |
+|------|------|------|
+| `package` | 准备版本目录 | `reuse` 目录已在磁盘 / `download` 取回 zip / `extract` 解压 / `install` 安装依赖 |
+| `migrate` | 预跑 SQL 迁移；未开启 `runMigration`、`migrateBeforeStart` 或版本无脚本时为 `skipped` | - |
+| `start` | PM2 拉起进程 | - |
+| `ready` | 健康检查；通过为 `done`，否则 `error`（`message` 为原因，如 `health check timeout`） | - |
+
+`status`：`running` / `done` / `skipped` / `error`。任一阶段 `error` 即部署失败；`ready` 为 `done` / `error` 时部署结束，前端可断开连接。
+
+```text
+event: snapshot
+data: {"steps":["package","migrate","start","ready"],"events":[]}
+
+event: progress
+data: {"progressId":"p-1","step":"package","status":"running","detail":"download","message":null,"at":"2026-10-10T10:00:00.000Z"}
+
+event: progress
+data: {"progressId":"p-1","step":"ready","status":"done","detail":null,"message":null,"at":"2026-10-10T10:00:05.000Z"}
+```
+
 #### 版本迁移脚本管理
 
-管理某版本 `server/{migrationPath}` 下的 `.sql` 文件，执行状态读写应用库的 `_fs_sql_migrations`（与 `@kne/fastify-sequelize` 共用，按文件名记账；共享库中不同应用的同名脚本会互相影响）。文件名须匹配 `[A-Za-z0-9_-.]+\.sql`。
+管理某版本的 `.sql` 文件。脚本内容存于版本记录（数据库），版本目录不在磁盘时也可查看和编辑；目录在磁盘上（当前版本）时同步写入 `server/{migrationPath}`，部署时以数据库为准覆盖。执行状态读写应用库的 `_fs_sql_migrations`（与 `@kne/fastify-sequelize` 共用，按文件名记账；共享库中不同应用的同名脚本会互相影响）。文件名须匹配 `[A-Za-z0-9_-.]+\.sql`。
 
 | 方法 | 路径 | 参数 | 说明 |
 |------|------|------|------|
@@ -447,12 +493,21 @@ data: {"name":"demo","ts":1791456608533,...}
 | `saveEnv({ name, env, secretEnvKeys? })` | 同 save-env |
 | `list({ filter, perPage, currentPage })` | 列表 |
 | `detail({ name })` | 详情（脱敏） |
-| `uploadVersion({ name, version, label, zipBuffer })` | 上传版本 |
+| `uploadVersion({ name, version, label, zipBuffer, fileId? })` | 上传版本；`fileId` 记入版本记录供后续重建 |
+| `resolveVersionPackage({ name, versionId })` | 下载用：返回 `{ fileName, buffer }`（原始 zip）或 `{ fileName, artifactPath, files }`（版本目录内待打包的相对路径） |
+| `getMigrationFiles(ver)` | 读取版本 SQL `[{ name, content, updatedAt }]`；旧版本记录为空时从版本目录回填 |
+| `saveMigrationFiles(ver, files)` | 写入版本 SQL 并同步 `hasMigration`，版本目录在磁盘上时同步覆盖 `.sql` |
+| `pruneVersionArtifacts(app)` | 删除该应用非当前、且有 `fileId` 的版本目录（删前回填 SQL），返回被删版本号 |
+| `pruneAllVersionArtifacts()` | 对所有应用执行 `pruneVersionArtifacts` |
+| `restoreMissingArtifacts()` | 当前版本目录（`artifactPath/server`）缺失时，按版本 `fileId` 经 `resolveVersionFile` 取回 zip 重建并恢复 `current` 链接（不跑 SQL 迁移）；返回 `[{ name, version, action: 'restored' \| 'skipped' \| 'failed', reason? }]`，无 `fileId` 的记 `skipped` |
 | `listVersions({ name, perPage, currentPage })` | 版本列表 |
-| `deploy({ name, versionId, version, runMigration, migrations? })` | 部署；立即 `deploying`，后台 `syncRealStatus` |
+| `deploy({ name, versionId, version, runMigration, migrations?, progressId? })` | 部署；版本目录缺失时先从宿主文件重建，启动后清理其它版本目录；立即 `deploying`，后台 `syncRealStatus`；各阶段进度写入 `getDeployProgress()` |
+| `getDeployProgress()` | 部署进度中心：`emitter`（事件名 `deploy:{name}`）、`snapshot(name)` 返回最近一次部署 `{ progressId, events }` |
 | `start` / `stop` / `restart` | 生命周期；`start`/`restart` 立即 `deploying`，后台按 PM2+health 写回真实状态 |
 | `syncStatus({ name, recoverIfMissing? })` | 同步单个应用真实状态并返回公开对象 |
-| `syncAllStatuses({ recoverIfMissing? })` | 批量同步（父应用启动 reconcile 使用） |
+| `syncAllStatuses({ recoverIfMissing?, excludeIds? })` | 批量同步（父应用启动 reconcile 使用）；`excludeIds` 中的应用跳过 |
+| `listMissingArtifacts()` | 列出当前版本目录（`artifactPath/server`）缺失的应用：`[{ app, ver }]` |
+| `restoreArtifact({ app, ver })` | 补回单个应用的当前版本目录，返回同 `restoreMissingArtifacts` 的单项 |
 | `remove({ name, exportBeforeRemove?, cleanupData?, ... })` | 删除；默认可导出+清理所属表 |
 | `logs({ name, stream, file?, perPage, currentPage, beforeLine? })` | 读当前日志或指定归档 |
 | `logFiles({ name })` | 列出日志文件 |
@@ -492,11 +547,13 @@ data: {"name":"demo","ts":1791456608533,...}
 
 | 方法签名 | 说明 |
 |----------|------|
-| `onReady()` | 连接 PM2、挂 log bus、启动日志切分与负载采样定时器，并 **setImmediate** 异步 `reconcile`、一次 `rotateLogs` 与一次 `sampleLoad`（不阻塞父应用 ready） |
+| `onReady()` | `ensureSchema` 后连接 PM2、挂 log bus、启动日志切分与负载采样定时器，并 **setImmediate** 异步执行 `recoverOnStartup`，以及一次 `rotateLogs` 与一次 `sampleLoad`（不阻塞父应用 ready） |
+| `ensureSchema()` | 宿主 `sync()` 不给已有表加列：为老库补齐后续新增的可空列（当前为 `appVersion.fileId`、`appVersion.migrationFiles`），可重复执行 |
+| `recoverOnStartup()` | 两路并行：部署目录完好的应用立即 `reconcile`；目录缺失的应用逐个 `restoreArtifact`（需重装依赖，较慢），每补完一个即单独 `syncStatus` 并按需拉起；补不回且原为 `running`/`deploying` 的标记 `error`；两路结束后 `pruneAllVersionArtifacts`。返回 `{ reconciled, restored, pruned }` |
 | `onClose()` | 停止切分与采样定时器并等待进行中的任务，断开 bus / PM2（由插件 `onClose` 调用） |
 | `rotateLogs({ now? })` | 立即执行一轮切分 + 压缩 + 保留清理；返回本轮切分的 `[{ name, stream, fileName, reason }]`，`reason` 为 `size` / `daily` |
 | `sampleLoad({ now? })` | 立即采样一轮：每个应用一条样本写入负载缓冲并推送 SSE，返回样本数组；PM2 未连接时返回 `[]` |
-| `reconcile()` | 调用 `app.syncAllStatuses({ recoverIfMissing: true })`：按 PM2 真实状态写回 DB；`running`/`deploying` 且进程缺失时尝试拉起 |
+| `reconcile({ excludeIds? })` | 调用 `app.syncAllStatuses({ recoverIfMissing: true, excludeIds })`：按 PM2 真实状态写回 DB；`running`/`deploying` 且进程缺失时尝试拉起 |
 
 ### 数据模型
 
@@ -535,6 +592,8 @@ data: {"name":"demo","ts":1791456608533,...}
 | artifactPath | string | 解压目录 |
 | hasMigration | boolean | 是否存在 sql 文件 |
 | migrationPath | string | 相对 server 的 sql 目录，默认 `sql` |
+| fileId | string / null | 宿主文件 id（经 `fileId` 上传时写入）；版本目录据此按需重建，非当前版本不常驻磁盘 |
+| migrationFiles | json / null | SQL 迁移脚本 `[{ name, content, updatedAt }]`，接口不返回（列表只给 `sqlFiles` 文件名） |
 
 唯一约束：`(app_name, version)`。
 
