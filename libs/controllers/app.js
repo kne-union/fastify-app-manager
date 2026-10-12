@@ -1,7 +1,9 @@
 const fp = require('fastify-plugin');
+const path = require('node:path');
 const fs = require('fs-extra');
 const yazl = require('yazl');
 const { createSseReply } = require('../utils/logStream');
+const { DEPLOY_STEPS } = require('../utils/deployProgress');
 const { formatInTz } = require('../utils/logTime');
 
 module.exports = fp(async (fastify, options) => {
@@ -117,29 +119,36 @@ module.exports = fp(async (fastify, options) => {
     {
       onRequest: auth(),
       schema: {
-        summary: '上传应用版本 zip'
+        summary: '上传应用版本 zip（multipart 传 file，或 JSON 传宿主文件 fileId）'
       }
     },
     async request => {
-      const parts = request.parts();
-      let name;
-      let version;
-      let label;
+      let { name, version, label, fileId } = request.isMultipart() ? {} : request.body || {};
       let zipBuffer;
-      for await (const part of parts) {
-        if (part.type === 'file') {
-          zipBuffer = await part.toBuffer();
-        } else {
-          const val = part.value;
-          if (part.fieldname === 'name') name = val;
-          if (part.fieldname === 'version') version = val;
-          if (part.fieldname === 'label') label = val;
+      if (request.isMultipart()) {
+        for await (const part of request.parts()) {
+          if (part.type === 'file') {
+            zipBuffer = await part.toBuffer();
+          } else {
+            const val = part.value;
+            if (part.fieldname === 'name') name = val;
+            if (part.fieldname === 'version') version = val;
+            if (part.fieldname === 'label') label = val;
+            if (part.fieldname === 'fileId') fileId = val;
+          }
         }
       }
-      if (!zipBuffer) {
-        throw fastify.httpErrors.badRequest('file is required');
+      if (zipBuffer) {
+        return services.app.uploadVersion({ name, version, label, zipBuffer });
       }
-      return services.app.uploadVersion({ name, version, label, zipBuffer });
+      if (!fileId) {
+        throw fastify.httpErrors.badRequest('file or fileId is required');
+      }
+      if (typeof options.resolveVersionFile !== 'function') {
+        throw fastify.httpErrors.badRequest('fileId upload is not supported: resolveVersionFile is not configured');
+      }
+      zipBuffer = await options.resolveVersionFile({ fileId, name, version, request });
+      return services.app.uploadVersion({ name, version, label, zipBuffer, fileId });
     }
   );
 
@@ -163,6 +172,39 @@ module.exports = fp(async (fastify, options) => {
     async request => services.app.listVersions(request.query)
   );
 
+  fastify.get(
+    `${options.prefix}/app/version/download`,
+    {
+      onRequest: auth(),
+      schema: {
+        summary: '下载版本部署包（有 fileId 返回原始 zip，否则由版本目录打包）',
+        query: {
+          type: 'object',
+          required: ['name', 'versionId'],
+          properties: {
+            name: { type: 'string' },
+            versionId: { type: 'string' }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      const { fileName, buffer, artifactPath, files } = await services.app.resolveVersionPackage(request.query);
+      reply.header('Content-Type', 'application/zip');
+      reply.header('Content-Disposition', `attachment; filename="${encodeURIComponent(fileName)}"; filename*=UTF-8''${encodeURIComponent(fileName)}`);
+      if (buffer) {
+        reply.header('Content-Length', buffer.length);
+        return reply.send(buffer);
+      }
+      const zipFile = new yazl.ZipFile();
+      for (const file of files) {
+        zipFile.addFile(path.join(artifactPath, file), file);
+      }
+      zipFile.end();
+      return reply.send(zipFile.outputStream);
+    }
+  );
+
   fastify.post(
     `${options.prefix}/app/deploy`,
     {
@@ -177,6 +219,7 @@ module.exports = fp(async (fastify, options) => {
             versionId: { type: 'string' },
             version: { type: 'string' },
             runMigration: { type: 'boolean', default: true },
+            progressId: { type: 'string', description: '进度标识；先用它订阅 deploy/stream 再发起部署' },
             migrations: {
               type: 'array',
               description: '逐个指定待执行脚本的处理方式；未列出的待执行脚本按 execute 处理',
@@ -194,6 +237,44 @@ module.exports = fp(async (fastify, options) => {
       }
     },
     async request => services.app.deploy(request.body)
+  );
+
+  fastify.get(
+    `${options.prefix}/app/deploy/stream`,
+    {
+      onRequest: auth(),
+      schema: {
+        summary: 'SSE 部署进度',
+        query: {
+          type: 'object',
+          required: ['name'],
+          properties: {
+            name: { type: 'string' },
+            progressId: { type: 'string' }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      const { name, progressId } = request.query;
+      await services.app.detail({ name });
+      const sse = createSseReply(reply, { heartbeatMs: options.sseHeartbeatMs });
+      const progress = services.app.getDeployProgress();
+      const matches = event => !progressId || event.progressId === progressId;
+      const snapshot = progress.snapshot(name);
+      sse.writeEvent('snapshot', {
+        steps: DEPLOY_STEPS,
+        events: snapshot ? snapshot.events.filter(matches) : []
+      });
+
+      const onProgress = event => matches(event) && sse.writeEvent('progress', event);
+      const eventName = `deploy:${name}`;
+      progress.emitter.on(eventName, onProgress);
+      request.raw.on('close', () => {
+        progress.emitter.off(eventName, onProgress);
+        sse.close();
+      });
+    }
   );
 
   fastify.get(

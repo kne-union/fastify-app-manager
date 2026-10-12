@@ -10,7 +10,8 @@ const { ensureLogFiles, readLogTail, readLastLines, appendLog, countLines } = re
 const { currentFileName, isCurrentFileName, resolveLogFile, listLogFiles } = require('../utils/logRotate');
 const { toIsoInTz, convertLogText } = require('../utils/logTime');
 const { runSqlMigrations, MIGRATION_ACTIONS } = require('../utils/migrate');
-const { listSqlFiles } = require('../utils/validatePackage');
+const { readSqlDir, writeSqlDir } = require('../utils/versionSql');
+const { createDeployProgress } = require('../utils/deployProgress');
 const pm2Util = require('../utils/pm2');
 
 const NAME_RE = /^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$/;
@@ -250,7 +251,42 @@ module.exports = fp(async (fastify, options) => {
     return toPublicApp(app);
   };
 
-  const uploadVersion = async ({ name, version, label, zipBuffer }) => {
+  const versionSqlDir = ver => path.join(ver.artifactPath, 'server', ver.migrationPath || options.sqlPath || 'sql');
+
+  const hasArtifact = ver => fs.pathExists(path.join(ver.artifactPath, 'server'));
+
+  /** SQL 以数据库为准；旧版本行（migrationFiles 为空）首次访问时从版本目录回填 */
+  const getMigrationFiles = async ver => {
+    if (Array.isArray(ver.migrationFiles)) {
+      return ver.migrationFiles;
+    }
+    if (!(await hasArtifact(ver))) {
+      return [];
+    }
+    const files = await readSqlDir(versionSqlDir(ver));
+    await ver.update({ migrationFiles: files, hasMigration: files.length > 0 });
+    return files;
+  };
+
+  /** 写库，版本目录在磁盘上时同步覆盖其 .sql */
+  const saveMigrationFiles = async (ver, files) => {
+    const sorted = [...files].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    await ver.update({ migrationFiles: sorted, hasMigration: sorted.length > 0 });
+    if (await hasArtifact(ver)) {
+      await writeSqlDir(versionSqlDir(ver), sorted);
+    }
+    return sorted;
+  };
+
+  const toPublicVersion = (row, files = row.migrationFiles) => {
+    const { migrationFiles, ...json } = row.toJSON();
+    if (Array.isArray(files) && files.length) {
+      json.sqlFiles = files.map(item => item.name);
+    }
+    return json;
+  };
+
+  const uploadVersion = async ({ name, version, label, zipBuffer, fileId }) => {
     if (!version) {
       httpError(400, 'version is required');
     }
@@ -270,7 +306,10 @@ module.exports = fp(async (fastify, options) => {
     // Prepare outside the version table so failed or in-progress uploads never appear in the version list.
     const versionsDir = path.join(app.rootPath, 'versions');
     const stagingPath = path.join(versionsDir, `.staging-${crypto.randomUUID()}`);
+    // 有宿主文件的版本只校验不常驻磁盘，部署时再解压；没有的只能保留目录
+    const keepArtifact = !fileId;
     let prepared;
+    let migrationFiles;
     try {
       prepared = await prepareVersionArtifact({
         zipBuffer,
@@ -278,8 +317,10 @@ module.exports = fp(async (fastify, options) => {
         maxZipSize: options.maxZipSize,
         maxZipEntries: options.maxZipEntries,
         npmInstallTimeoutMs: options.npmInstallTimeoutMs,
-        sqlPath: options.sqlPath
+        sqlPath: options.sqlPath,
+        install: keepArtifact
       });
+      migrationFiles = await readSqlDir(path.join(stagingPath, 'server', prepared.migrationPath));
     } catch (e) {
       await fs.remove(stagingPath).catch(() => {});
       httpError(400, e.message);
@@ -287,26 +328,34 @@ module.exports = fp(async (fastify, options) => {
 
     let artifactPath = null;
     try {
-      return await models.appVersion.sequelize.transaction(async transaction => {
+      const result = await models.appVersion.sequelize.transaction(async transaction => {
         const versionRow = await models.appVersion.create(
           {
             appName: name,
             version,
             label: label || null,
             artifactPath: stagingPath,
-            hasMigration: prepared.hasMigration,
-            migrationPath: prepared.migrationPath
+            hasMigration: migrationFiles.length > 0,
+            migrationPath: prepared.migrationPath,
+            fileId: fileId ? String(fileId) : null,
+            migrationFiles
           },
           { transaction }
         );
         artifactPath = path.join(versionsDir, String(versionRow.id));
-        await fs.move(stagingPath, artifactPath);
+        if (keepArtifact) {
+          await fs.move(stagingPath, artifactPath);
+        }
         await versionRow.update({ artifactPath }, { transaction });
-        return versionRow.toJSON();
+        return toPublicVersion(versionRow);
       });
+      if (!keepArtifact) {
+        await fs.remove(stagingPath).catch(() => {});
+      }
+      return result;
     } catch (e) {
       await fs.remove(stagingPath).catch(() => {});
-      if (artifactPath) {
+      if (artifactPath && keepArtifact) {
         await fs.remove(artifactPath).catch(() => {});
       }
       if (e.name === 'SequelizeUniqueConstraintError') {
@@ -326,14 +375,50 @@ module.exports = fp(async (fastify, options) => {
     });
     const pageData = await Promise.all(
       rows.map(async row => {
-        const json = row.toJSON();
-        if (json.hasMigration) {
-          json.sqlFiles = await listSqlFiles(path.join(json.artifactPath, 'server', json.migrationPath || 'sql'));
-        }
-        return json;
+        const files = await getMigrationFiles(row);
+        return toPublicVersion(row, files);
       })
     );
     return { pageData, totalCount: count };
+  };
+
+  const listArtifactFiles = async (root, dir = '') => {
+    const files = [];
+    for (const entry of await fs.readdir(path.join(root, dir), { withFileTypes: true })) {
+      const rel = dir ? `${dir}/${entry.name}` : entry.name;
+      // 部署时装的依赖与复制进 server 的 build 都不属于原始包
+      if (rel === 'server/node_modules' || rel === 'server/build') {
+        continue;
+      }
+      if (entry.isDirectory()) {
+        files.push(...(await listArtifactFiles(root, rel)));
+      } else if (entry.isFile()) {
+        files.push(rel);
+      }
+    }
+    return files;
+  };
+
+  /** 有 fileId 时返回原始 zip；否则从版本目录还原包内容（不含 server/node_modules、server/build） */
+  const resolveVersionPackage = async ({ name, versionId }) => {
+    await getByName(name);
+    const ver = await models.appVersion.findByPk(versionId);
+    if (!ver || ver.appName !== name) {
+      httpError(404, 'version not found');
+    }
+    const fileName = `${name}-${ver.version}.zip`;
+    if (ver.fileId && typeof options.resolveVersionFile === 'function') {
+      try {
+        const buffer = await options.resolveVersionFile({ fileId: ver.fileId, name, version: ver.version });
+        return { fileName, buffer };
+      } catch (e) {
+        fastify.log.warn({ err: e, app: name, version: ver.version }, 'resolve version file failed, fallback to artifact');
+      }
+    }
+    if (!(await fs.pathExists(path.join(ver.artifactPath, 'server')))) {
+      httpError(404, 'version package not found');
+    }
+    return { fileName, artifactPath: ver.artifactPath, files: await listArtifactFiles(ver.artifactPath) };
   };
 
   const healthCheck = async (port, { timeoutMs, intervalMs, healthPath }) => {
@@ -365,6 +450,7 @@ module.exports = fp(async (fastify, options) => {
 
   /** 同一 app 并发同步合并为一次，避免 restart/reconcile 竞态 */
   const statusSyncInflight = new Map();
+  const deployProgress = createDeployProgress();
 
   /**
    * 根据 PM2 真实进程状态 + HTTP 健康检查，异步写回 DB status。
@@ -459,11 +545,14 @@ module.exports = fp(async (fastify, options) => {
 
   const finishDeployAsync = async appId => syncRealStatus(appId, { recoverIfMissing: false });
 
-  const scheduleStatusSync = (appId, opts) => {
+  const scheduleStatusSync = (appId, { onSettled, ...opts } = {}) => {
     setImmediate(() => {
-      syncRealStatus(appId, opts).catch(err => {
-        fastify.log.warn({ err, appId }, 'syncRealStatus failed');
-      });
+      syncRealStatus(appId, opts)
+        .catch(err => {
+          fastify.log.warn({ err, appId }, 'syncRealStatus failed');
+          return { status: 'error', message: err.message };
+        })
+        .then(result => onSettled && onSettled(result));
     });
   };
 
@@ -472,14 +561,18 @@ module.exports = fp(async (fastify, options) => {
     return syncRealStatus(app.id, { recoverIfMissing });
   };
 
-  const syncAllStatuses = async ({ recoverIfMissing = true } = {}) => {
+  const syncAllStatuses = async ({ recoverIfMissing = true, excludeIds = [] } = {}) => {
     const apps = await models.app.findAll({
       where: {
         status: ['running', 'deploying', 'stopped', 'error']
       }
     });
+    const excluded = new Set(excludeIds.map(String));
     const results = [];
     for (const app of apps) {
+      if (excluded.has(String(app.id))) {
+        continue;
+      }
       const shouldRecover = recoverIfMissing && (app.status === 'running' || app.status === 'deploying');
       results.push(await syncRealStatus(app.id, { recoverIfMissing: shouldRecover }));
     }
@@ -551,7 +644,117 @@ module.exports = fp(async (fastify, options) => {
     });
   };
 
-  const deploy = async ({ name, versionId, version, runMigration = true, migrations }) => {
+  const linkCurrent = async (app, artifactPath) => {
+    const currentLink = path.join(app.rootPath, 'current');
+    await fs.remove(currentLink).catch(() => {});
+    await fs.symlink(artifactPath, currentLink).catch(async () => {
+      // Windows fallback: copy marker file
+      await fs.writeFile(path.join(app.rootPath, 'current-path.txt'), artifactPath);
+    });
+  };
+
+  /** 只做 fs 检查：返回当前版本目录（artifactPath/server）缺失的应用 */
+  const listMissingArtifacts = async () => {
+    const { Op } = fastify.sequelize.Sequelize;
+    const apps = await models.app.findAll({ where: { currentVersionId: { [Op.ne]: null } } });
+    const missing = [];
+    for (const app of apps) {
+      const ver = await models.appVersion.findByPk(app.currentVersionId);
+      if (ver && !(await fs.pathExists(path.join(ver.artifactPath, 'server')))) {
+        missing.push({ app, ver });
+      }
+    }
+    return missing;
+  };
+
+  const canResolveFile = ver => !!ver.fileId && typeof options.resolveVersionFile === 'function';
+
+  /** 版本目录不在磁盘时按 fileId 取回 zip 解压并装依赖；再以数据库中的 SQL 覆盖目录内 .sql */
+  const materializeArtifact = async (app, ver, { onProgress } = {}) => {
+    if (await hasArtifact(ver)) {
+      onProgress && onProgress('reuse');
+    } else {
+      if (!canResolveFile(ver)) {
+        throw new Error(`version ${ver.version} artifact missing and cannot be restored without fileId`);
+      }
+      const stagingPath = path.join(app.rootPath, 'versions', `.staging-${crypto.randomUUID()}`);
+      try {
+        onProgress && onProgress('download');
+        const zipBuffer = await options.resolveVersionFile({ fileId: ver.fileId, name: app.name, version: ver.version });
+        await prepareVersionArtifact({
+          zipBuffer,
+          artifactPath: stagingPath,
+          maxZipSize: options.maxZipSize,
+          maxZipEntries: options.maxZipEntries,
+          npmInstallTimeoutMs: options.npmInstallTimeoutMs,
+          sqlPath: options.sqlPath,
+          onProgress
+        });
+        await fs.move(stagingPath, ver.artifactPath, { overwrite: true });
+      } catch (e) {
+        await fs.remove(stagingPath).catch(() => {});
+        throw e;
+      }
+    }
+    await writeSqlDir(versionSqlDir(ver), await getMigrationFiles(ver));
+  };
+
+  /** 删除非当前版本中可从宿主文件重建的目录；删前先把 SQL 回填进库 */
+  const pruneVersionArtifacts = async app => {
+    const versions = await models.appVersion.findAll({ where: { appName: app.name } });
+    const removed = [];
+    for (const ver of versions) {
+      if (String(ver.id) === String(app.currentVersionId) || !canResolveFile(ver) || !(await fs.pathExists(ver.artifactPath))) {
+        continue;
+      }
+      await getMigrationFiles(ver);
+      await fs.remove(ver.artifactPath);
+      removed.push(ver.version);
+    }
+    if (removed.length) {
+      fastify.log.info({ app: app.name, versions: removed }, 'pruned non-current version artifacts');
+    }
+    return removed;
+  };
+
+  const pruneAllVersionArtifacts = async () => {
+    const results = [];
+    for (const app of await models.app.findAll()) {
+      try {
+        results.push({ name: app.name, removed: await pruneVersionArtifacts(app) });
+      } catch (e) {
+        fastify.log.warn({ err: e, app: app.name }, 'prune version artifacts failed');
+      }
+    }
+    return results;
+  };
+
+  /** 补回当前版本目录并恢复 current 链接；不跑 SQL 迁移 */
+  const restoreArtifact = async ({ app, ver }) => {
+    if (!canResolveFile(ver)) {
+      fastify.log.warn({ app: app.name, version: ver.version }, 'current version artifact missing and cannot be restored without fileId');
+      return { name: app.name, version: ver.version, action: 'skipped', reason: 'no fileId' };
+    }
+    try {
+      await materializeArtifact(app, ver);
+      await linkCurrent(app, ver.artifactPath);
+      fastify.log.info({ app: app.name, version: ver.version }, 'current version artifact restored from file');
+      return { name: app.name, version: ver.version, action: 'restored' };
+    } catch (e) {
+      fastify.log.warn({ err: e, app: app.name, version: ver.version }, 'restore current version artifact failed');
+      return { name: app.name, version: ver.version, action: 'failed', reason: e.message };
+    }
+  };
+
+  const restoreMissingArtifacts = async () => {
+    const results = [];
+    for (const item of await listMissingArtifacts()) {
+      results.push(await restoreArtifact(item));
+    }
+    return results;
+  };
+
+  const deploy = async ({ name, versionId, version, runMigration = true, migrations, progressId }) => {
     const app = await getByName(name);
     let ver = null;
     if (versionId) {
@@ -563,21 +766,29 @@ module.exports = fp(async (fastify, options) => {
       httpError(404, 'version not found');
     }
 
+    const progress = deployProgress.begin(app.name, progressId || crypto.randomUUID());
+    let step = 'package';
+    progress.report(step, 'running');
+    try {
+      await materializeArtifact(app, ver, { onProgress: detail => progress.report('package', 'running', { detail }) });
+    } catch (e) {
+      progress.report(step, 'error', { message: e.message });
+      httpError(400, e.message);
+    }
+    progress.report(step, 'done');
+
     await app.update({
       status: 'deploying',
       currentVersionId: String(ver.id),
       message: null
     });
 
-    const currentLink = path.join(app.rootPath, 'current');
-    await fs.remove(currentLink).catch(() => {});
-    await fs.symlink(ver.artifactPath, currentLink).catch(async () => {
-      // Windows fallback: copy marker file
-      await fs.writeFile(path.join(app.rootPath, 'current-path.txt'), ver.artifactPath);
-    });
+    await linkCurrent(app, ver.artifactPath);
 
     try {
+      step = 'migrate';
       if (runMigration && options.migrateBeforeStart && ver.hasMigration) {
+        progress.report(step, 'running');
         const env = mergeEnv({
           passthroughEnvKeys: options.passthroughEnvKeys,
           appEnv: app.env,
@@ -612,6 +823,9 @@ module.exports = fp(async (fastify, options) => {
         } catch (e) {
           // ignore ownership merge failures
         }
+        progress.report(step, 'done');
+      } else {
+        progress.report(step, 'skipped');
       }
 
       if (runMigration === false) {
@@ -619,18 +833,29 @@ module.exports = fp(async (fastify, options) => {
         app.env = Object.assign({}, app.env, { RUN_SQL_ON_SYNC: 'false' });
       }
 
+      step = 'start';
+      progress.report(step, 'running');
       const beforeForReady = await snapshotTablesSafe(app);
       await startProcess(app);
-      scheduleStatusSync(app.id, { beforeTables: beforeForReady });
+      progress.report(step, 'done');
+      step = 'ready';
+      progress.report(step, 'running');
+      scheduleStatusSync(app.id, {
+        beforeTables: beforeForReady,
+        onSettled: result => (result?.status === 'running' ? progress.report('ready', 'done') : progress.report('ready', 'error', { message: result?.message || result?.status || null }))
+      });
+      await pruneVersionArtifacts(app).catch(err => fastify.log.warn({ err, app: app.name }, 'prune version artifacts failed'));
       return {
         name: app.name,
         status: 'deploying',
         versionId: String(ver.id),
+        progressId: progress.progressId,
         port: app.port,
         pathUrl: `${mountPrefix(app.name)}/`,
         domain: app.domain
       };
     } catch (e) {
+      progress.report(step, 'error', { message: e.message });
       await app.update({ status: 'error', message: e.message });
       httpError(400, e.message);
     }
@@ -715,6 +940,7 @@ module.exports = fp(async (fastify, options) => {
     const snapshot = app.toJSON();
     await models.appVersion.destroy({ where: { appName: name } });
     await fs.remove(app.rootPath).catch(() => {});
+    deployProgress.clear(app.name);
     await app.destroy();
     if (typeof options.onAppRemoved === 'function') {
       try {
@@ -858,6 +1084,14 @@ module.exports = fp(async (fastify, options) => {
       syncStatus,
       syncAllStatuses,
       remove,
+      resolveVersionPackage,
+      listMissingArtifacts,
+      restoreArtifact,
+      restoreMissingArtifacts,
+      pruneVersionArtifacts,
+      pruneAllVersionArtifacts,
+      getMigrationFiles,
+      saveMigrationFiles,
       logs,
       logFiles,
       resolveAppLogFile,
@@ -865,6 +1099,7 @@ module.exports = fp(async (fastify, options) => {
       removeLogFiles,
       load,
       getLoadStore,
+      getDeployProgress: () => deployProgress,
       toPublicApp,
       mountPrefix,
       findByHost,

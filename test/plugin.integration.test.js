@@ -1029,4 +1029,64 @@ describe('plugin integration', function () {
     const loadData = JSON.parse(events.match(/event: load\ndata: (.+)\n/)[1]);
     expect(loadData).to.include({ name: 'metric', ts: start + 20000 });
   });
+
+  it('should stream deploy progress over sse', async () => {
+    await fastify.inject({ method: 'POST', url: '/api/v1/app-manager/app/create', payload: { name: 'prog', label: 'Prog' } });
+    const uploaded = await fastify.inject(buildUploadRequest({ name: 'prog', version: '1.0.0', zipBuffer: await buildPackageZip() }));
+    const version = uploaded.json();
+    const row = await fastify.appManager.models.app.findOne({ where: { name: 'prog' } });
+    backend = http.createServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('ok');
+    });
+    await new Promise((resolve, reject) => {
+      backend.listen(row.port, '127.0.0.1', err => (err ? reject(err) : resolve()));
+    });
+
+    const address = await fastify.listen({ port: 0, host: '127.0.0.1' });
+    let deployed;
+    const progressId = 'p-1';
+    const events = await new Promise((resolve, reject) => {
+      const req = http.get(`${address}/api/v1/app-manager/app/deploy/stream?name=prog&progressId=${progressId}`, res => {
+        let buffer = '';
+        res.setEncoding('utf8');
+        res.on('data', chunk => {
+          const hadSnapshot = /event: snapshot\ndata: .+\n/.test(buffer);
+          buffer += chunk;
+          if (!hadSnapshot && /event: snapshot\ndata: .+\n/.test(buffer)) {
+            fastify
+              .inject({ method: 'POST', url: '/api/v1/app-manager/app/deploy', payload: { name: 'prog', versionId: String(version.id), progressId } })
+              .then(result => (deployed = result))
+              .catch(reject);
+          }
+          if (/"step":"ready","status":"(done|error)"/.test(buffer)) {
+            req.destroy();
+            resolve(buffer);
+          }
+        });
+      });
+      req.on('error', err => (err.code === 'ECONNRESET' ? null : reject(err)));
+    });
+
+    const snapshot = JSON.parse(events.match(/event: snapshot\ndata: (.+)\n/)[1]);
+    expect(snapshot).to.deep.equal({ steps: ['package', 'migrate', 'start', 'ready'], events: [] });
+    const progress = [...events.matchAll(/event: progress\ndata: (.+)\n/g)].map(m => JSON.parse(m[1]));
+    expect(progress.every(item => item.progressId === progressId)).to.equal(true);
+    expect(progress.map(item => [item.step, item.status, item.detail])).to.deep.equal([
+      ['package', 'running', null],
+      ['package', 'running', 'reuse'],
+      ['package', 'done', null],
+      ['migrate', 'skipped', null],
+      ['start', 'running', null],
+      ['start', 'done', null],
+      ['ready', 'running', null],
+      ['ready', 'done', null]
+    ]);
+    while (!deployed) await new Promise(r => setTimeout(r, 10));
+    expect(deployed.statusCode).to.equal(200);
+    expect(deployed.json().progressId).to.equal(progressId);
+
+    const replay = fastify.appManager.services.app.getDeployProgress().snapshot('prog');
+    expect(replay.events).to.have.length(8);
+  });
 });

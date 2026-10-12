@@ -1,12 +1,10 @@
 const fp = require('fastify-plugin');
-const path = require('node:path');
-const fs = require('fs-extra');
-const { listSqlFiles } = require('../utils/validatePackage');
 const { isValidSqlFileName, readExecutedMigrations, recordMigration, removeMigrationRecord } = require('../utils/migrate');
 
 module.exports = fp(async (fastify, options) => {
   const { models } = fastify[options.name];
   const getDbops = () => fastify[options.name].services.dbops;
+  const getAppService = () => fastify[options.name].services.app;
 
   const httpError = (statusCode, message) => {
     if (fastify.httpErrors) {
@@ -27,8 +25,7 @@ module.exports = fp(async (fastify, options) => {
     if (!ver || ver.appName !== name) {
       httpError(404, 'version not found');
     }
-    const sqlDir = path.join(ver.artifactPath, 'server', ver.migrationPath || options.sqlPath);
-    return { app, ver, sqlDir };
+    return { app, ver };
   };
 
   const assertFileName = file => {
@@ -37,25 +34,20 @@ module.exports = fp(async (fastify, options) => {
     }
   };
 
-  const assertFileExists = async (sqlDir, file) => {
+  const getFiles = ver => getAppService().getMigrationFiles(ver);
+
+  const findFile = async (ver, file) => {
     assertFileName(file);
-    const filePath = path.join(sqlDir, file);
-    if (!(await fs.pathExists(filePath))) {
+    const item = (await getFiles(ver)).find(f => f.name === file);
+    if (!item) {
       httpError(404, `sql file ${file} not found`);
     }
-    return filePath;
-  };
-
-  const syncHasMigration = async (ver, sqlDir) => {
-    const hasMigration = (await listSqlFiles(sqlDir)).length > 0;
-    if (ver.hasMigration !== hasMigration) {
-      await ver.update({ hasMigration });
-    }
+    return item;
   };
 
   const list = async ({ name, versionId }) => {
-    const { app, ver, sqlDir } = await resolveVersion({ name, versionId });
-    const files = await listSqlFiles(sqlDir);
+    const { app, ver } = await resolveVersion({ name, versionId });
+    const files = await getFiles(ver);
     let executedMap = new Map();
     let dbError = null;
     try {
@@ -63,18 +55,13 @@ module.exports = fp(async (fastify, options) => {
     } catch (e) {
       dbError = e.message;
     }
-    const pageData = await Promise.all(
-      files.map(async file => {
-        const stat = await fs.stat(path.join(sqlDir, file));
-        return {
-          name: file,
-          size: stat.size,
-          updatedAt: stat.mtime,
-          executed: dbError ? null : executedMap.has(file),
-          executedAt: executedMap.get(file) || null
-        };
-      })
-    );
+    const pageData = files.map(item => ({
+      name: item.name,
+      size: Buffer.byteLength(item.content || '', 'utf8'),
+      updatedAt: item.updatedAt || null,
+      executed: dbError ? null : executedMap.has(item.name),
+      executedAt: executedMap.get(item.name) || null
+    }));
     return {
       versionId: String(ver.id),
       version: ver.version,
@@ -87,32 +74,33 @@ module.exports = fp(async (fastify, options) => {
   };
 
   const content = async ({ name, versionId, file }) => {
-    const { sqlDir } = await resolveVersion({ name, versionId });
-    const filePath = await assertFileExists(sqlDir, file);
-    return { name: file, content: await fs.readFile(filePath, 'utf8') };
+    const { ver } = await resolveVersion({ name, versionId });
+    const item = await findFile(ver, file);
+    return { name: file, content: item.content || '' };
   };
 
   const save = async ({ name, versionId, file, content: sql }) => {
     assertFileName(file);
-    const { ver, sqlDir } = await resolveVersion({ name, versionId });
-    await fs.ensureDir(sqlDir);
-    await fs.writeFile(path.join(sqlDir, file), sql || '', 'utf8');
-    await syncHasMigration(ver, sqlDir);
+    const { ver } = await resolveVersion({ name, versionId });
+    const files = (await getFiles(ver)).filter(f => f.name !== file);
+    files.push({ name: file, content: sql || '', updatedAt: new Date().toISOString() });
+    await getAppService().saveMigrationFiles(ver, files);
     return { name: file };
   };
 
   const remove = async ({ name, versionId, file }) => {
-    const { ver, sqlDir } = await resolveVersion({ name, versionId });
-    const filePath = await assertFileExists(sqlDir, file);
-    await fs.remove(filePath);
-    await syncHasMigration(ver, sqlDir);
+    const { ver } = await resolveVersion({ name, versionId });
+    await findFile(ver, file);
+    await getAppService().saveMigrationFiles(
+      ver,
+      (await getFiles(ver)).filter(f => f.name !== file)
+    );
     return { name: file };
   };
 
   const execute = async ({ name, versionId, file }) => {
-    const { app, sqlDir } = await resolveVersion({ name, versionId });
-    const filePath = await assertFileExists(sqlDir, file);
-    const sql = await fs.readFile(filePath, 'utf8');
+    const { app, ver } = await resolveVersion({ name, versionId });
+    const { content: sql } = await findFile(ver, file);
     const dbops = getDbops();
     let beforeTables = [];
     let afterTables = [];
@@ -131,8 +119,8 @@ module.exports = fp(async (fastify, options) => {
   };
 
   const mark = async ({ name, versionId, file }) => {
-    const { app, sqlDir } = await resolveVersion({ name, versionId });
-    await assertFileExists(sqlDir, file);
+    const { app, ver } = await resolveVersion({ name, versionId });
+    await findFile(ver, file);
     await getDbops().withSequelize(app, sequelize => recordMigration(sequelize, file));
     return { name: file, executed: true };
   };

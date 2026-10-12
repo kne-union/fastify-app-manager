@@ -33,6 +33,16 @@ module.exports = ({ DataTypes }) => {
         allowNull: true,
         defaultValue: 'sql',
         comment: '相对 server 的 sql 目录'
+      },
+      fileId: {
+        type: DataTypes.STRING,
+        allowNull: true,
+        comment: '宿主文件 id；版本目录缺失时经 resolveVersionFile 重建'
+      },
+      migrationFiles: {
+        type: DataTypes.JSON,
+        allowNull: true,
+        comment: 'SQL 迁移文件 [{ name, content, updatedAt }]；版本目录可随时删除，部署时写回磁盘'
       }
     },
     options: {

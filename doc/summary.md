@@ -33,18 +33,20 @@ Client / Admin UI
 | Path gateway | `/app/{name}` 剥前缀；改写绝对路径 Location、Cookie Path、文本类 body |
 | 未运行兜底 | 应用存在但未 `running` 时，网关返回 503 状态页（已停止 / 启动中 / 异常 / 未部署），接口请求返回 JSON，不再落到宿主 404；`/app/{name}` 下应用不存在时返回 404「应用不存在」页 |
 | PM2 | 每应用一进程，名 `app-manager__{name}`；stdout/stderr 由 PM2 落 `appsRoot/{name}/logs`，插件按大小/按天切分归档 |
-| Bootstrap | `onReady` 连接 PM2、挂 log bus（只推 SSE）、启动日志切分与负载采样定时器；**异步**对托管应用做 `syncAllStatuses`（不阻塞父应用 ready） |
+| Bootstrap | `onReady` 连接 PM2、挂 log bus（只推 SSE）、启动日志切分与负载采样定时器；**异步**并行：目录完好的托管应用立即 `syncAllStatuses`，缺当前版本目录的应用按版本 `fileId` 逐个补回后再单独拉起，最后清理非当前版本目录（均不阻塞父应用 ready） |
 
 #### 部署时序
 
 ```
-uploadVersion (zip)
+uploadVersion (zip / fileId)
        ↓
- 校验包格式 → 解压 → npm install --production（server）
+ 校验包格式 → SQL 写入版本记录；multipart 解压并 npm install 后保留目录，fileId 不保留目录
        ↓
 deploy(versionId)
        ↓
- status=deploying → 可选 SQL 迁移 → inject entryHtml → pm2.start
+ 目录缺失则按 fileId 解压 + npm install → 数据库 SQL 覆盖写回
+       ↓
+ status=deploying → 可选 SQL 迁移 → inject entryHtml → pm2.start → 清理其它版本目录
        ↓（立即返回）
  后台 healthCheck → running / error
 ```
@@ -56,7 +58,7 @@ deploy(versionId)
 | 概念 | 说明 |
 |------|------|
 | **App** | 元信息、分配端口、env、pm2Config、状态机；落盘目录 `appsRoot/{name}` |
-| **AppVersion** | 一次 zip 上传产物；`artifactPath` 存解压后的包；部署时按 id 或 version 选择 |
+| **AppVersion** | 一次 zip 上传产物；`artifactPath` 为解压目录（有 `fileId` 的版本只在当前部署时常驻磁盘），SQL 脚本存于 `migrationFiles`；部署时按 id 或 version 选择 |
 | **端口池** | 默认 `4000–7999`，创建时分配未占用端口；`PORT` 强制写入子进程 env |
 
 #### 状态机
@@ -102,6 +104,7 @@ deploy(versionId)
 |------|------|
 | 版本上传 | Zip Slip 防护、条目数/体积上限、解压丢弃任意层级 `node_modules`、Fullstack 包格式校验、server 生产依赖安装 |
 | 短部署 | `deploy` / `start` / `restart` 立即返回 `deploying`，后台按 PM2 真实状态 + healthCheck 写回 `running`/`error`/`stopped` |
+| 部署进度 | `deploy` 按「准备部署包 → SQL 迁移 → 启动进程 → 等待就绪」上报阶段，经 `GET .../app/deploy/stream` SSE 推送（含下载 / 解压 / 安装依赖等子阶段） |
 | 生命周期 | `start` / `stop` / `restart` / `remove`；父应用重启后异步 `syncAllStatuses` 对齐 PM2 |
 | 双通道访问 | 自定义域名透明反代 + `/app/{name}` 剥前缀反代 |
 | 日志 | PM2 落盘 + 历史分页（`beforeLine` 上滚、每页最多 100 行）+ SSE（含回放行与心跳） |
