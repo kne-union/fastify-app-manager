@@ -1,9 +1,11 @@
 const path = require('node:path');
 const fs = require('fs-extra');
+const { readEnvSchema } = require('./envSchema');
 
 const ENTRY_CANDIDATES = ['index.html', 'entry.html', 'entry-prod.html'];
 
-const validatePackageRoot = async rootDir => {
+/** requireEnvSchema=false 时缺少 / 非法的 env.schema.json 不算错误，envSchema 返回 null（用于从宿主文件还原老版本） */
+const validatePackageRoot = async (rootDir, { requireEnvSchema = true } = {}) => {
   const errors = [];
   const rootPkg = path.join(rootDir, 'package.json');
   const serverPkg = path.join(rootDir, 'server', 'package.json');
@@ -28,9 +30,19 @@ const validatePackageRoot = async rootDir => {
     }
   }
 
+  let envSchema = null;
+  try {
+    envSchema = await readEnvSchema(path.join(rootDir, 'server'));
+  } catch (e) {
+    if (requireEnvSchema) {
+      errors.push(e.message);
+    }
+  }
+
   return {
     ok: errors.length === 0,
     errors,
+    envSchema,
     hasMigration: await hasSqlMigrations(path.join(rootDir, 'server', 'sql'))
   };
 };

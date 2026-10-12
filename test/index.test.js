@@ -6,6 +6,7 @@ const { mergeEnv, maskEnvForResponse, applyEnvPatch, SECRET_MASK, normalizeSecre
 const { assertDefaultAppDbSeparated, resolveDbScope, buildTablePrefix, filterOwnedTables } = require('../libs/utils/dbIdentity');
 const { assertReadOnlyQuerySql } = require('../libs/utils/sqlQueryGuard');
 const { validatePackageRoot } = require('../libs/utils/validatePackage');
+const { validateEnv, checkEnvSchema } = require('../libs/utils/envSchema');
 const { isPathInside } = require('../libs/utils/zip');
 const { rewriteLocation, rewriteSetCookiePath, rewriteBody, shouldRewriteBody, tagEtag, restoreConditionalHeaders } = require('../libs/utils/pathRewrite');
 const { injectEntryHtml } = require('../libs/utils/entryInject');
@@ -192,17 +193,49 @@ describe('@kne/fastify-app-manager', function () {
   });
 
   describe('validatePackage', () => {
-    it('should accept fullstack layout', async () => {
+    const writeFullstack = async ({ envSchema } = {}) => {
       const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'fam-pkg-'));
       await fs.writeJson(path.join(dir, 'package.json'), { name: 'x' });
       await fs.ensureDir(path.join(dir, 'server'));
       await fs.writeJson(path.join(dir, 'server', 'package.json'), { name: 'server' });
       await fs.writeFile(path.join(dir, 'server', 'index.js'), 'console.log(1)');
+      if (envSchema !== undefined) {
+        await fs.writeFile(path.join(dir, 'server', 'env.schema.json'), typeof envSchema === 'string' ? envSchema : JSON.stringify(envSchema));
+      }
       await fs.ensureDir(path.join(dir, 'build'));
       await fs.writeFile(path.join(dir, 'build', 'index.html'), '<html></html>');
+      return dir;
+    };
+
+    it('should accept fullstack layout', async () => {
+      const dir = await writeFullstack({ envSchema: { type: 'object', properties: { PORT: { type: 'number' } } } });
       const result = await validatePackageRoot(dir);
       expect(result.ok).to.equal(true);
+      expect(result.envSchema.properties).to.have.property('PORT');
       await fs.remove(dir);
+    });
+
+    it('should reject missing or invalid env.schema.json unless not required', async () => {
+      const missing = await writeFullstack();
+      const result = await validatePackageRoot(missing);
+      expect(result.ok).to.equal(false);
+      expect(result.errors.join()).to.include('missing server/env.schema.json');
+      const lenient = await validatePackageRoot(missing, { requireEnvSchema: false });
+      expect(lenient.ok).to.equal(true);
+      expect(lenient.envSchema).to.equal(null);
+      await fs.remove(missing);
+
+      const broken = await writeFullstack({ envSchema: '{ not json' });
+      expect((await validatePackageRoot(broken)).errors.join()).to.include('not valid JSON');
+      await fs.remove(broken);
+
+      const undeclared = await writeFullstack({ envSchema: { type: 'object', required: ['TOKEN'], properties: {} } });
+      expect((await validatePackageRoot(undeclared)).errors.join()).to.include('required keys not declared in properties: TOKEN');
+      await fs.remove(undeclared);
+
+      const unknownKeyword = await writeFullstack({ envSchema: { type: 'object', properties: { A: { type: 'string', 'x-label': 'a' } } } });
+      expect((await validatePackageRoot(unknownKeyword)).errors.join()).to.include('unknown keyword');
+      await fs.remove(unknownKeyword);
     });
 
     it('should reject missing build', async () => {
@@ -214,6 +247,34 @@ describe('@kne/fastify-app-manager', function () {
       const result = await validatePackageRoot(dir);
       expect(result.ok).to.equal(false);
       await fs.remove(dir);
+    });
+  });
+
+  describe('envSchema', () => {
+    const schema = {
+      type: 'object',
+      required: ['TOKEN', 'PORT'],
+      properties: {
+        TOKEN: { type: 'string', writeOnly: true, description: '令牌' },
+        PORT: { type: 'number' },
+        MODE: { type: 'string', enum: ['a', 'b'] },
+        CODE: { type: 'string', pattern: '^[A-Z]+$' },
+        LIST: { type: 'string', separator: ',' }
+      }
+    };
+
+    it('should accept standard annotations and env-schema separator', () => {
+      expect(checkEnvSchema(schema)).to.deep.equal([]);
+      expect(checkEnvSchema({ type: 'string' })).to.include('env.schema.json: "type" must be "object"');
+    });
+
+    it('should coerce types and report per key errors', () => {
+      expect(validateEnv(schema, { TOKEN: 't', PORT: '8080', MODE: 'a', CODE: 'ABC' })).to.deep.equal([]);
+      const errors = validateEnv(schema, { TOKEN: '', PORT: 'abc', MODE: 'c', CODE: 'abc' });
+      expect(errors).to.deep.include({ key: 'TOKEN', message: '必填，未配置' });
+      expect(errors).to.deep.include({ key: 'PORT', message: '类型应为 number' });
+      expect(errors).to.deep.include({ key: 'MODE', message: '取值应为 a / b' });
+      expect(errors.find(item => item.key === 'CODE').message).to.include('格式应匹配');
     });
   });
 

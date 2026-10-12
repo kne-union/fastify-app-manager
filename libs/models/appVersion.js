@@ -43,6 +43,11 @@ module.exports = ({ DataTypes }) => {
         type: DataTypes.JSON,
         allowNull: true,
         comment: 'SQL 迁移文件 [{ name, content, updatedAt }]；版本目录可随时删除，部署时写回磁盘'
+      },
+      envSchema: {
+        type: DataTypes.JSON,
+        allowNull: true,
+        comment: 'server/env.schema.json 内容；启动前按它校验环境变量'
       }
     },
     options: {

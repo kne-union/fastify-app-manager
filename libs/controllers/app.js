@@ -114,6 +114,25 @@ module.exports = fp(async (fastify, options) => {
     async request => services.app.saveEnv(request.body)
   );
 
+  fastify.get(
+    `${options.prefix}/app/env/schema`,
+    {
+      onRequest: auth(),
+      schema: {
+        summary: '环境变量声明：按版本 env.schema.json 列出需要填写的变量（不含应用中心注入的变量）',
+        query: {
+          type: 'object',
+          required: ['name'],
+          properties: {
+            name: { type: 'string' },
+            versionId: { type: 'string', description: '默认取当前版本，没有则取最新上传的版本' }
+          }
+        }
+      }
+    },
+    async request => services.app.getEnvDeclaration(request.query)
+  );
+
   fastify.post(
     `${options.prefix}/app/version/upload`,
     {

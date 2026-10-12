@@ -194,6 +194,7 @@ module.exports = {
   pickHostEnv,
   hasAppDbConfig,
   DB_DEDICATED_KEY,
+  DB_CONNECTION_KEYS,
   isAppDbEnabled,
   buildDefaultAppDbEnv,
   resolveAppDbEnv,
