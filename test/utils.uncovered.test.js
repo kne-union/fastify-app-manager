@@ -256,6 +256,7 @@ describe('uncovered utils', function () {
       await fs.ensureDir(path.join(work, 'server'));
       await fs.writeJson(path.join(work, 'server', 'package.json'), { name: 'server' });
       await fs.writeFile(path.join(work, 'server', 'index.js'), 'console.log(1)');
+      await fs.writeJson(path.join(work, 'server', 'env.schema.json'), { type: 'object', properties: { PORT: { type: 'number' } } });
       await fs.ensureDir(path.join(work, 'server', 'sql'));
       await fs.writeFile(path.join(work, 'server', 'sql', '001.sql'), 'SELECT 1;');
       await fs.ensureDir(path.join(work, 'build'));
@@ -273,6 +274,7 @@ describe('uncovered utils', function () {
       });
       expect(prepared.hasMigration).to.equal(true);
       expect(prepared.sqlFiles).to.include('001.sql');
+      expect(prepared.envSchema.properties.PORT.type).to.equal('number');
       expect(await fs.pathExists(path.join(artifactPath, 'server', 'build', 'index.html'))).to.equal(true);
       await fs.remove(work);
       await fs.remove(artifactPath);

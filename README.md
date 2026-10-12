@@ -64,6 +64,8 @@ deploy(versionId)
        ↓
  目录缺失则按 fileId 解压 + npm install → 数据库 SQL 覆盖写回
        ↓
+ 按 env.schema.json 校验环境变量（不通过即 400，不切版本、不启动）
+       ↓
  status=deploying → 可选 SQL 迁移 → inject entryHtml → pm2.start → 清理其它版本目录
        ↓（立即返回）
  后台 healthCheck → running / error
@@ -111,6 +113,7 @@ deploy(versionId)
 | 应用自有库 | 应用 `env` 含完整 `DB_*` 且 `DB_DEDICATED` 不为 `false` 时为独享库（`dbScope=dedicated`）；`DB_DEDICATED=false` 保留配置但回落共享库。`dbScope` 始终由 env 推导，与启动注入的连接一致；独享库若带 `DB_TABLE_PREFIX`（与其它系统共用库）只认该前缀的表 |
 | 共享库表前缀 | 启动时注入 `DB_TABLE_PREFIX=t_{appName}_` 并由系统写回应用 env（接口不返回、不可修改）；子应用 sequelize 须读取该变量建表 |
 | 表归属 | `options.ownedTables`；共享库启动就绪后按前缀自动认领，亦可 `sync-owned` 扫描；运维仅限归属表 |
+| 变量声明 | 子应用在 `server/env.schema.json` 声明所需变量（标准 JSON Schema，必填放顶层 `required`，敏感值 `writeOnly`）；上传缺失即拒绝，启动前（deploy / start / restart / 恢复）按它校验最终变量；`GET .../app/env/schema` 列出需要用户填写的变量，隐藏 `PORT`、托管库 `DB_*`、系统变量等应用中心注入的键 |
 
 ##### SQL 迁移
 
@@ -122,7 +125,7 @@ deploy(versionId)
 |------|------|
 | 版本上传 | Zip Slip 防护、条目数/体积上限、解压丢弃任意层级 `node_modules`、Fullstack 包格式校验、server 生产依赖安装 |
 | 短部署 | `deploy` / `start` / `restart` 立即返回 `deploying`，后台按 PM2 真实状态 + healthCheck 写回 `running`/`error`/`stopped` |
-| 部署进度 | `deploy` 按「准备部署包 → SQL 迁移 → 启动进程 → 等待就绪」上报阶段，经 `GET .../app/deploy/stream` SSE 推送（含下载 / 解压 / 安装依赖等子阶段） |
+| 部署进度 | `deploy` 按「准备部署包 → 校验环境变量 → SQL 迁移 → 启动进程 → 等待就绪」上报阶段，经 `GET .../app/deploy/stream` SSE 推送（含下载 / 解压 / 安装依赖等子阶段） |
 | 生命周期 | `start` / `stop` / `restart` / `remove`；父应用重启后异步 `syncAllStatuses` 对齐 PM2 |
 | 双通道访问 | 自定义域名透明反代 + `/app/{name}` 剥前缀反代 |
 | 日志 | PM2 落盘 + 历史分页（`beforeLine` 上滚、每页最多 100 行）+ SSE（含回放行与心跳） |
@@ -171,6 +174,7 @@ await fastify.listen({ port: 3000 });
 | `package.json` | 根包描述 |
 | `server/package.json` | 服务端依赖 |
 | `server/index.js` | PM2 入口 |
+| `server/env.schema.json` | 环境变量声明（必需）；规范见 API 文档「环境变量 schema」 |
 | `build/` | 已构建前端；含 `index.html` / `entry.html` / `entry-prod.html` 之一 |
 | `server/sql/*.sql` | 可选；存在则 `hasMigration=true` |
 
@@ -286,10 +290,51 @@ await fastify.listen({ port: 3000 });
 | 参数名 | 类型 | 必填 | 说明 |
 |--------|------|------|------|
 | name | string | 是 | 应用 slug |
-| env | object | 是 | patch：`null` 删键；secret 键值为 `********` 时保持原值 |
+| env | object | 是 | patch：`null` 删键；secret 键值为 `********` 时保持原值；`PORT` 与 `systemEnvKeys` 中的键忽略 |
 | secretEnvKeys | array | 否 | 新增的显式密钥键名，与原列表合并写入 `options.secretEnvKeys`（仅保留仍存在于 env 的键）。密钥类型不可撤销，只有删除该变量才会移出列表 |
 
 > **关键设计**：密钥判定 = 键名匹配 `secretEnvKeyPattern` **或** 出现在 `options.secretEnvKeys`。响应顶层 `secretEnvKeys` 为二者并集，便于管理端把普通变量标成密钥而不改键名。
+
+##### GET `{prefix}/app/env/schema`
+
+按版本的 `server/env.schema.json` 列出需要用户填写的环境变量，供环境变量管理页针对性补充。
+
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| name | string | 是 | 应用 slug |
+| versionId | string | 否 | 默认取当前版本，没有则取最新上传的版本 |
+
+返回：
+
+```json
+{
+  "name": "demo",
+  "versionId": "354173577374729216",
+  "version": "1.0.0",
+  "hasSchema": true,
+  "valid": false,
+  "declared": [
+    {
+      "key": "API_TOKEN",
+      "type": "string",
+      "required": true,
+      "default": null,
+      "description": "接口令牌",
+      "enum": null,
+      "secret": true,
+      "configured": false,
+      "value": null,
+      "error": "必填，未配置"
+    }
+  ],
+  "others": [{ "key": "EXTRA", "secret": false, "value": "x" }]
+}
+```
+
+- `declared`：schema `properties` 中的变量；`secret` 来自 `writeOnly: true` 或密钥判定；`value` 为当前值（密钥掩码）；`error` 为按当前配置校验的结果。
+- `others`：已配置但 schema 未声明的变量。
+- 两者都**不含应用中心注入的变量**（见 `services.app.listInjectedEnvKeys`）：`PORT`、`DB_TABLE_PREFIX`、`systemEnvKeys`、`passthroughEnvKeys`、托管库连接 `DB_DIALECT` / `DB_HOST` / `DB_PORT` / `DB_DATABASE` / `DB_USERNAME` / `DB_PASSWORD` / `DB_STORAGE` 与 `DB_DEDICATED`（自有库在数据页签配置），以及最近一次启动时 `resolveSystemEnv` 返回的键（记录在 `options.injectedEnvKeys`）。注入的变量照常参与启动前校验。
+- 版本没有 schema 时 `hasSchema=false`、`declared=[]`，该版本无法部署。
 
 ##### 数据运维与表生命周期
 
@@ -337,7 +382,7 @@ await fastify.listen({ port: 3000 });
 | version | string | 是 | 版本号；同应用内唯一 |
 | label | string | 否 | 版本说明 |
 
-成功返回 `appVersion` 记录（含 `artifactPath`、`hasMigration`、`fileId`、`sqlFiles` 等）。包中 `server/{sqlPath}/*.sql` 的内容写入版本记录（数据库）。传 `fileId` 时只解压校验、不装依赖，也不保留版本目录（部署时再从宿主文件解压）；multipart 上传无处重建，解压并 `npm install` 后保留目录。包在临时目录处理完才写入版本表，上传中或失败的包不会出现在版本列表；包非法或 npm 失败时清理临时目录并返回 400。版本号已存在返回 409；同版本号仅残留软删除记录时会先彻底清除再写入。
+成功返回 `appVersion` 记录（含 `artifactPath`、`hasMigration`、`hasEnvSchema`、`fileId`、`sqlFiles` 等）。包中 `server/{sqlPath}/*.sql` 的内容与 `server/env.schema.json` 写入版本记录（数据库）；缺少 `server/env.schema.json` 或其不符合规范的包直接拒绝（400）。传 `fileId` 时只解压校验、不装依赖，也不保留版本目录（部署时再从宿主文件解压）；multipart 上传无处重建，解压并 `npm install` 后保留目录。包在临时目录处理完才写入版本表，上传中或失败的包不会出现在版本列表；包非法或 npm 失败时清理临时目录并返回 400。版本号已存在返回 409；同版本号仅残留软删除记录时会先彻底清除再写入。
 
 ##### GET `{prefix}/app/version/list`
 
@@ -379,7 +424,7 @@ await fastify.listen({ port: 3000 });
 
 ##### POST `{prefix}/app/deploy`
 
-选择版本部署。版本目录不在磁盘时先经 `resolveVersionFile` 取回 zip 解压并 `npm install`（耗时，取不回返回 400 且不改应用状态），再以数据库中的 SQL 覆盖目录内 `.sql`；随后立即返回 `deploying`，后台做健康检查。进程启动后删除该应用其它有 `fileId` 的版本目录（只保留当前版本）。
+选择版本部署。版本目录不在磁盘时先经 `resolveVersionFile` 取回 zip 解压并 `npm install`（耗时，取不回返回 400 且不改应用状态），再以数据库中的 SQL 覆盖目录内 `.sql`；接着按版本的 `env.schema.json` 校验最终环境变量（含注入的变量），版本没有 schema 或变量不合规时返回 400，且不切换版本、不执行迁移、不启动进程；随后立即返回 `deploying`，后台做健康检查。进程启动后删除该应用其它有 `fileId` 的版本目录（只保留当前版本）。
 
 | 参数名 | 类型 | 必填 | 默认值 | 说明 |
 |--------|------|------|--------|------|
@@ -426,6 +471,7 @@ SSE 部署进度。连接时先推送 `snapshot`（该应用最近一次部署�
 | step | 说明 | `detail`（`status=running` 时） |
 |------|------|------|
 | `package` | 准备版本目录 | `reuse` 目录已在磁盘 / `download` 取回 zip / `extract` 解压 / `install` 安装依赖 |
+| `env` | 按 `env.schema.json` 校验环境变量；失败时 `message` 列出每个不合规的键与原因 | - |
 | `migrate` | 预跑 SQL 迁移；未开启 `runMigration`、`migrateBeforeStart` 或版本无脚本时为 `skipped` | - |
 | `start` | PM2 拉起进程 | - |
 | `ready` | 健康检查；通过为 `done`，否则 `error`（`message` 为原因，如 `health check timeout`） | - |
@@ -434,7 +480,7 @@ SSE 部署进度。连接时先推送 `snapshot`（该应用最近一次部署�
 
 ```text
 event: snapshot
-data: {"steps":["package","migrate","start","ready"],"events":[]}
+data: {"steps":["package","env","migrate","start","ready"],"events":[]}
 
 event: progress
 data: {"progressId":"p-1","step":"package","status":"running","detail":"download","message":null,"at":"2026-10-10T10:00:00.000Z"}
@@ -509,9 +555,9 @@ data: {"progressId":"p-1","step":"ready","status":"done","detail":null,"message"
 
 | 动作 | 行为摘要 |
 |------|----------|
-| start | 需已有 `currentVersionId`；拉起进程并后台健康检查 |
+| start | 需已有 `currentVersionId`；先按 `env.schema.json` 校验环境变量，不通过返回 400 且不改状态；拉起进程并后台健康检查 |
 | stop | PM2 stop，状态 `stopped` |
-| restart | 优先 PM2 restart，失败则重新 startProcess |
+| restart | 先校验环境变量（不通过返回 400，正在运行的进程不受影响），再停止并重新 startProcess |
 | remove | 删 PM2 进程、版本记录、落盘目录与 App 行 |
 
 ##### GET `{prefix}/app/logs`
@@ -686,6 +732,9 @@ data: {"name":"demo","ts":1791456608533,...}
 | `listVersions({ name, perPage, currentPage })` | 版本列表 |
 | `deploy({ name, versionId, version, runMigration, migrations?, progressId? })` | 部署；版本目录缺失时先从宿主文件重建，启动后清理其它版本目录；立即 `deploying`，后台 `syncRealStatus`；各阶段进度写入 `getDeployProgress()` |
 | `getDeployProgress()` | 部署进度中心：`emitter`（事件名 `deploy:{name}`）、`snapshot(name)` 返回最近一次部署 `{ progressId, events }` |
+| `waitDeployProgress({ name, progressId, timeoutMs? })` | 等到该次部署出错或 `ready` 结束（默认超时 120000ms），返回 `{ progressId, ok, timedOut, events }`；供 MCP 等同步调用方使用 |
+| `getEnvDeclaration({ name, versionId? })` | 同 `GET .../app/env/schema` |
+| `listInjectedEnvKeys(app)` | 应用中心注入（或在其它页签维护）的变量名 `Set`，环境变量声明中不展示 |
 | `start` / `stop` / `restart` | 生命周期；`start`/`restart` 立即 `deploying`，后台按 PM2+health 写回真实状态 |
 | `syncStatus({ name, recoverIfMissing? })` | 同步单个应用真实状态并返回公开对象 |
 | `syncAllStatuses({ recoverIfMissing?, excludeIds? })` | 批量同步（父应用启动 reconcile 使用）；`excludeIds` 中的应用跳过 |
@@ -777,6 +826,7 @@ data: {"name":"demo","ts":1791456608533,...}
 | migrationPath | string | 相对 server 的 sql 目录，默认 `sql` |
 | fileId | string / null | 宿主文件 id（经 `fileId` 上传时写入）；版本目录据此按需重建，非当前版本不常驻磁盘 |
 | migrationFiles | json / null | SQL 迁移脚本 `[{ name, content, updatedAt }]`，接口不返回（列表只给 `sqlFiles` 文件名） |
+| envSchema | json / null | `server/env.schema.json` 内容，接口不返回（列表只给 `hasEnvSchema`）；老版本为空时从版本目录回填 |
 
 唯一约束：`(app_name, version)`。
 
@@ -840,8 +890,30 @@ rename 为 {stream}-{起始时间}.log ──→ pm2 reloadLogs ──→ gzip �
 | 非 Buffer / 超 `maxZipSize` / 超 `maxZipEntries` | 抛错 |
 | 条目含 `..` 或逃出目标目录 | Zip Slip，抛错 |
 | 缺根/server package、server/index、build 入口 html | `invalid package` |
+| 缺 `server/env.schema.json`、JSON 非法或不符合规范 | `invalid package`（从宿主文件还原老版本目录时不检查，由启动前校验提示） |
 
 部署时会将根 `build/` 复制到 `server/build/`，再对 `server/build` 做 entryHtml 注入。
+
+##### 环境变量 schema（server/env.schema.json）
+
+标准 JSON Schema，子应用 `@fastify/env` 直接 `require` 使用；为兼容 ajv 严格模式只用标准关键字：
+
+- 顶层 `"type": "object"`，必填项写进顶层 `required`（其中的键必须在 `properties` 中声明）。
+- `properties.<KEY>` 内用 `type` / `default` / `enum` / `pattern` / `description` / `title`；敏感值标 `"writeOnly": true`（环境变量管理按密钥处理）。不使用 `x-` 等自定义关键字。
+- 校验规则与 `@fastify/env` 一致（`coerceTypes`、`useDefaults`）；空字符串视为未配置。
+
+启动前（deploy 的 `env` 阶段、start、restart、宿主重启后的恢复）都会校验，不通过时不启动进程。
+
+```json
+{
+  "type": "object",
+  "required": ["API_TOKEN"],
+  "properties": {
+    "API_TOKEN": { "type": "string", "writeOnly": true, "description": "接口令牌" },
+    "PORT": { "type": "number", "default": 8040, "description": "服务端口（应用中心注入）" }
+  }
+}
+```
 
 ##### 环境合并顺序
 

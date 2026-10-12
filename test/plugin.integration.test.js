@@ -8,12 +8,17 @@ const AdmZip = require('adm-zip');
 const Fastify = require('fastify');
 const { createMockPm2, installMockPm2, uninstallMockPm2 } = require('./helpers/mockPm2');
 
-const buildPackageZip = async ({ withSql = false } = {}) => {
+const DEFAULT_ENV_SCHEMA = { type: 'object', required: [], properties: { PORT: { type: 'number', description: '服务端口' } } };
+
+const buildPackageZip = async ({ withSql = false, envSchema = DEFAULT_ENV_SCHEMA } = {}) => {
   const work = await fs.mkdtemp(path.join(os.tmpdir(), 'fam-pkg-zip-'));
   await fs.writeJson(path.join(work, 'package.json'), { name: 'demo-app' });
   await fs.ensureDir(path.join(work, 'server'));
   await fs.writeJson(path.join(work, 'server', 'package.json'), { name: 'demo-server' });
   await fs.writeFile(path.join(work, 'server', 'index.js'), 'console.log("ok")');
+  if (envSchema) {
+    await fs.writeJson(path.join(work, 'server', 'env.schema.json'), envSchema);
+  }
   if (withSql) {
     await fs.ensureDir(path.join(work, 'server', 'sql'));
     await fs.writeFile(path.join(work, 'server', 'sql', '001.sql'), 'CREATE TABLE IF NOT EXISTS t1 (id INTEGER);');
@@ -1069,13 +1074,15 @@ describe('plugin integration', function () {
     });
 
     const snapshot = JSON.parse(events.match(/event: snapshot\ndata: (.+)\n/)[1]);
-    expect(snapshot).to.deep.equal({ steps: ['package', 'migrate', 'start', 'ready'], events: [] });
+    expect(snapshot).to.deep.equal({ steps: ['package', 'env', 'migrate', 'start', 'ready'], events: [] });
     const progress = [...events.matchAll(/event: progress\ndata: (.+)\n/g)].map(m => JSON.parse(m[1]));
     expect(progress.every(item => item.progressId === progressId)).to.equal(true);
     expect(progress.map(item => [item.step, item.status, item.detail])).to.deep.equal([
       ['package', 'running', null],
       ['package', 'running', 'reuse'],
       ['package', 'done', null],
+      ['env', 'running', null],
+      ['env', 'done', null],
       ['migrate', 'skipped', null],
       ['start', 'running', null],
       ['start', 'done', null],
@@ -1087,6 +1094,80 @@ describe('plugin integration', function () {
     expect(deployed.json().progressId).to.equal(progressId);
 
     const replay = fastify.appManager.services.app.getDeployProgress().snapshot('prog');
-    expect(replay.events).to.have.length(8);
+    expect(replay.events).to.have.length(10);
+  });
+
+  it('should reject packages without env.schema.json', async () => {
+    await fastify.inject({ method: 'POST', url: '/api/v1/app-manager/app/create', payload: { name: 'noschema', label: 'No Schema' } });
+    const uploaded = await fastify.inject(buildUploadRequest({ name: 'noschema', version: '1.0.0', zipBuffer: await buildPackageZip({ envSchema: null }) }));
+    expect(uploaded.statusCode).to.equal(400);
+    expect(uploaded.json().message).to.include('missing server/env.schema.json');
+  });
+
+  it('should validate env against schema before deploy, start and restart and list declared env', async () => {
+    const envSchema = {
+      type: 'object',
+      required: ['API_TOKEN', 'PORT', 'DB_DIALECT'],
+      properties: {
+        API_TOKEN: { type: 'string', writeOnly: true, description: '接口令牌' },
+        RETRIES: { type: 'number', default: 3, description: '重试次数' },
+        PORT: { type: 'number' },
+        DB_DIALECT: { type: 'string' },
+        DB_TABLE_PREFIX: { type: 'string' }
+      }
+    };
+    await fastify.inject({ method: 'POST', url: '/api/v1/app-manager/app/create', payload: { name: 'strict', label: 'Strict', env: { EXTRA: 'x' } } });
+    const version = (await fastify.inject(buildUploadRequest({ name: 'strict', version: '1.0.0', zipBuffer: await buildPackageZip({ envSchema }) }))).json();
+    expect(version.hasEnvSchema).to.equal(true);
+    expect(version).to.not.have.property('envSchema');
+
+    const getDeclaration = async () => (await fastify.inject({ method: 'GET', url: '/api/v1/app-manager/app/env/schema?name=strict' })).json();
+    const before = await getDeclaration();
+    expect(before).to.include({ hasSchema: true, valid: false, version: '1.0.0' });
+    // PORT / DB_* / DB_TABLE_PREFIX 由应用中心注入，既不列出也不报错
+    expect(before.declared.map(item => item.key)).to.deep.equal(['API_TOKEN', 'RETRIES']);
+    expect(before.declared[0]).to.include({ required: true, secret: true, configured: false, value: null, error: '必填，未配置', description: '接口令牌' });
+    expect(before.declared[1]).to.include({ required: false, default: 3, error: null });
+    expect(before.others).to.deep.equal([{ key: 'EXTRA', secret: false, value: 'x' }]);
+
+    const deploy = () => fastify.inject({ method: 'POST', url: '/api/v1/app-manager/app/deploy', payload: { name: 'strict', versionId: String(version.id), progressId: `p-${Date.now()}` } });
+    const blocked = await deploy();
+    expect(blocked.statusCode).to.equal(400);
+    expect(blocked.json().message).to.include('API_TOKEN 必填，未配置');
+    const blockedEvents = fastify.appManager.services.app.getDeployProgress().snapshot('strict').events;
+    expect(blockedEvents[blockedEvents.length - 1]).to.include({ step: 'env', status: 'error' });
+    const untouched = await fastify.appManager.models.app.findOne({ where: { name: 'strict' } });
+    expect(untouched.currentVersionId).to.equal(null);
+    expect(untouched.status).to.equal('idle');
+
+    const saved = await fastify.inject({ method: 'POST', url: '/api/v1/app-manager/app/save-env', payload: { name: 'strict', env: { API_TOKEN: 't', RETRIES: 'abc', PORT: '1' } } });
+    expect(saved.json().env).to.not.have.property('PORT');
+    expect((await deploy()).json().message).to.include('RETRIES 类型应为 number');
+
+    await fastify.inject({ method: 'POST', url: '/api/v1/app-manager/app/save-env', payload: { name: 'strict', env: { RETRIES: '5' } } });
+    const after = await getDeclaration();
+    expect(after.valid).to.equal(true);
+    expect(after.declared[0]).to.include({ configured: true, value: '********', error: null });
+
+    const row = await fastify.appManager.models.app.findOne({ where: { name: 'strict' } });
+    backend = http.createServer((req, res) => res.end('ok'));
+    await new Promise((resolve, reject) => backend.listen(row.port, '127.0.0.1', err => (err ? reject(err) : resolve())));
+    const progressId = 'strict-ok';
+    const ok = await fastify.inject({ method: 'POST', url: '/api/v1/app-manager/app/deploy', payload: { name: 'strict', versionId: String(version.id), progressId } });
+    expect(ok.statusCode).to.equal(200);
+    const waited = await fastify.appManager.services.app.waitDeployProgress({ name: 'strict', progressId, timeoutMs: 5000 });
+    expect(waited).to.include({ ok: true, timedOut: false });
+    expect(waited.events.map(item => `${item.step}:${item.status}`)).to.include.members(['env:done', 'ready:done']);
+
+    await fastify.inject({ method: 'POST', url: '/api/v1/app-manager/app/save-env', payload: { name: 'strict', env: { API_TOKEN: null } } });
+    for (const action of ['restart', 'start']) {
+      const res = await fastify.inject({ method: 'POST', url: `/api/v1/app-manager/app/${action}`, payload: { name: 'strict' } });
+      expect(res.statusCode).to.equal(400);
+      expect(res.json().message).to.include('API_TOKEN 必填，未配置');
+    }
+    expect((await fastify.appManager.models.app.findOne({ where: { name: 'strict' } })).status).to.equal('running');
+
+    const timedOut = await fastify.appManager.services.app.waitDeployProgress({ name: 'strict', progressId: 'unknown', timeoutMs: 20 });
+    expect(timedOut).to.include({ ok: false, timedOut: true });
   });
 });

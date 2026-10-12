@@ -6,7 +6,7 @@ const AdmZip = require('adm-zip');
 const Fastify = require('fastify');
 const { createMockPm2, installMockPm2, uninstallMockPm2 } = require('./helpers/mockPm2');
 
-const buildPackageZip = async ({ sql = {} } = {}) => {
+const buildPackageZip = async ({ sql = {}, envSchema = { type: 'object', properties: { PORT: { type: 'number' } } } } = {}) => {
   const work = await fs.mkdtemp(path.join(os.tmpdir(), 'fam-hook-zip-'));
   for (const [file, content] of Object.entries(sql)) {
     await fs.outputFile(path.join(work, 'server', 'sql', file), content);
@@ -15,6 +15,9 @@ const buildPackageZip = async ({ sql = {} } = {}) => {
   await fs.ensureDir(path.join(work, 'server'));
   await fs.writeJson(path.join(work, 'server', 'package.json'), { name: 'demo-server', dependencies: { 'demo-dep': '1.0.0' } });
   await fs.writeFile(path.join(work, 'server', 'index.js'), 'console.log("ok")');
+  if (envSchema) {
+    await fs.writeJson(path.join(work, 'server', 'env.schema.json'), envSchema);
+  }
   await fs.ensureDir(path.join(work, 'build'));
   await fs.writeFile(path.join(work, 'build', 'index.html'), '<html><head></head><body>hi</body></html>');
   const zip = new AdmZip();
@@ -132,6 +135,30 @@ describe('system env hooks', function () {
     expect(deployed.statusCode).to.equal(200);
     return uploaded.json();
   };
+
+  it('should hide keys injected by resolveSystemEnv from env declaration but still validate with them', async () => {
+    await fastify.inject({ method: 'POST', url: '/api/v1/app-manager/app/create', payload: { name: 'declared', label: 'declared', env: { NAME: 'a' } } });
+    const envSchema = {
+      type: 'object',
+      required: ['HOOK_CLIENT_ID', 'HOOK_RUNTIME_ONLY', 'NAME'],
+      properties: {
+        HOOK_CLIENT_ID: { type: 'string' },
+        HOOK_RUNTIME_ONLY: { type: 'string' },
+        NAME: { type: 'string', description: '名称' }
+      }
+    };
+    const uploaded = (await fastify.inject(uploadRequest({ name: 'declared', version: '1.0.0', zipBuffer: await buildPackageZip({ envSchema }) }))).json();
+    const deployed = await fastify.inject({ method: 'POST', url: '/api/v1/app-manager/app/deploy', payload: { name: 'declared', versionId: String(uploaded.id) } });
+    expect(deployed.statusCode).to.equal(200);
+
+    const app = await fastify.appManager.models.app.findOne({ where: { name: 'declared' } });
+    expect(app.options.injectedEnvKeys).to.have.members(['HOOK_CLIENT_ID', 'HOOK_SECRET', 'HOOK_RUNTIME_ONLY']);
+    const declaration = (await fastify.inject({ method: 'GET', url: '/api/v1/app-manager/app/env/schema?name=declared' })).json();
+    expect(declaration.valid).to.equal(true);
+    expect(declaration.declared.map(item => item.key)).to.deep.equal(['NAME']);
+    expect(declaration.others).to.deep.equal([]);
+    expect(fastify.appManager.services.app.listInjectedEnvKeys(app).has('HOOK_RUNTIME_ONLY')).to.equal(true);
+  });
 
   it('should inject resolved env, persist system keys and keep them hidden and locked', async () => {
     const version = await createAndDeploy('hooked');

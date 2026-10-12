@@ -46,6 +46,8 @@ deploy(versionId)
        ↓
  目录缺失则按 fileId 解压 + npm install → 数据库 SQL 覆盖写回
        ↓
+ 按 env.schema.json 校验环境变量（不通过即 400，不切版本、不启动）
+       ↓
  status=deploying → 可选 SQL 迁移 → inject entryHtml → pm2.start → 清理其它版本目录
        ↓（立即返回）
  后台 healthCheck → running / error
@@ -93,6 +95,7 @@ deploy(versionId)
 | 应用自有库 | 应用 `env` 含完整 `DB_*` 且 `DB_DEDICATED` 不为 `false` 时为独享库（`dbScope=dedicated`）；`DB_DEDICATED=false` 保留配置但回落共享库。`dbScope` 始终由 env 推导，与启动注入的连接一致；独享库若带 `DB_TABLE_PREFIX`（与其它系统共用库）只认该前缀的表 |
 | 共享库表前缀 | 启动时注入 `DB_TABLE_PREFIX=t_{appName}_` 并由系统写回应用 env（接口不返回、不可修改）；子应用 sequelize 须读取该变量建表 |
 | 表归属 | `options.ownedTables`；共享库启动就绪后按前缀自动认领，亦可 `sync-owned` 扫描；运维仅限归属表 |
+| 变量声明 | 子应用在 `server/env.schema.json` 声明所需变量（标准 JSON Schema，必填放顶层 `required`，敏感值 `writeOnly`）；上传缺失即拒绝，启动前（deploy / start / restart / 恢复）按它校验最终变量；`GET .../app/env/schema` 列出需要用户填写的变量，隐藏 `PORT`、托管库 `DB_*`、系统变量等应用中心注入的键 |
 
 #### SQL 迁移
 
@@ -104,7 +107,7 @@ deploy(versionId)
 |------|------|
 | 版本上传 | Zip Slip 防护、条目数/体积上限、解压丢弃任意层级 `node_modules`、Fullstack 包格式校验、server 生产依赖安装 |
 | 短部署 | `deploy` / `start` / `restart` 立即返回 `deploying`，后台按 PM2 真实状态 + healthCheck 写回 `running`/`error`/`stopped` |
-| 部署进度 | `deploy` 按「准备部署包 → SQL 迁移 → 启动进程 → 等待就绪」上报阶段，经 `GET .../app/deploy/stream` SSE 推送（含下载 / 解压 / 安装依赖等子阶段） |
+| 部署进度 | `deploy` 按「准备部署包 → 校验环境变量 → SQL 迁移 → 启动进程 → 等待就绪」上报阶段，经 `GET .../app/deploy/stream` SSE 推送（含下载 / 解压 / 安装依赖等子阶段） |
 | 生命周期 | `start` / `stop` / `restart` / `remove`；父应用重启后异步 `syncAllStatuses` 对齐 PM2 |
 | 双通道访问 | 自定义域名透明反代 + `/app/{name}` 剥前缀反代 |
 | 日志 | PM2 落盘 + 历史分页（`beforeLine` 上滚、每页最多 100 行）+ SSE（含回放行与心跳） |
@@ -153,6 +156,7 @@ await fastify.listen({ port: 3000 });
 | `package.json` | 根包描述 |
 | `server/package.json` | 服务端依赖 |
 | `server/index.js` | PM2 入口 |
+| `server/env.schema.json` | 环境变量声明（必需）；规范见 API 文档「环境变量 schema」 |
 | `build/` | 已构建前端；含 `index.html` / `entry.html` / `entry-prod.html` 之一 |
 | `server/sql/*.sql` | 可选；存在则 `hasMigration=true` |
 

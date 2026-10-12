@@ -42,7 +42,7 @@ module.exports = fp(async (fastify, options) => {
     const queryInterface = model.sequelize.getQueryInterface();
     const table = model.getTableName();
     const columns = await queryInterface.describeTable(table);
-    for (const name of ['fileId', 'migrationFiles']) {
+    for (const name of ['fileId', 'migrationFiles', 'envSchema']) {
       const attr = model.rawAttributes[name];
       if (!columns[attr.field]) {
         await queryInterface.addColumn(table, attr.field, { type: attr.type, allowNull: true, comment: attr.comment });

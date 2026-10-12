@@ -3,7 +3,22 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const fs = require('fs-extra');
 const portPool = require('../utils/portPool');
-const { mergeEnv, maskEnvForResponse, applyEnvPatch, mergePm2Config, normalizeSecretKeys, collectSecretKeys, isSystemEnvKey, omitSystemEnv } = require('../utils/env');
+const {
+  mergeEnv,
+  maskEnvForResponse,
+  applyEnvPatch,
+  mergePm2Config,
+  normalizeSecretKeys,
+  collectSecretKeys,
+  isSystemEnvKey,
+  isSecretKey,
+  omitSystemEnv,
+  SECRET_MASK,
+  SYSTEM_ENV_KEYS,
+  DB_CONNECTION_KEYS,
+  DB_DEDICATED_KEY
+} = require('../utils/env');
+const { readEnvSchema, validateEnv, ENV_SCHEMA_FILE } = require('../utils/envSchema');
 const { prepareVersionArtifact } = require('../utils/version');
 const { injectEntryHtml } = require('../utils/entryInject');
 const { ensureLogFiles, readLogTail, readLastLines, appendLog, countLines } = require('../utils/logFiles');
@@ -198,7 +213,9 @@ module.exports = fp(async (fastify, options) => {
     const app = await getByName(name);
     // 密钥类型不可撤销，只随变量删除而移除
     const secretEnvKeys = normalizeSecretKeys([...resolveSecretEnvKeys(app), ...(nextSecretKeys || [])]);
-    const nextEnv = applyEnvPatch(app.env || {}, env || {}, Object.assign({}, options, { secretEnvKeys }));
+    // PORT 由端口池分配，启动时总会覆盖，不接受外部写入
+    const { PORT, ...envPatch } = env || {};
+    const nextEnv = applyEnvPatch(app.env || {}, envPatch, Object.assign({}, options, { secretEnvKeys }));
     const cleanedSecrets = secretEnvKeys.filter(key => !isSystemEnvKey(key, options.systemEnvKeys) && Object.prototype.hasOwnProperty.call(nextEnv, key));
     await app.update({
       env: nextEnv,
@@ -279,11 +296,29 @@ module.exports = fp(async (fastify, options) => {
   };
 
   const toPublicVersion = (row, files = row.migrationFiles) => {
-    const { migrationFiles, ...json } = row.toJSON();
+    const { migrationFiles, envSchema, ...json } = row.toJSON();
     if (Array.isArray(files) && files.length) {
       json.sqlFiles = files.map(item => item.name);
     }
+    json.hasEnvSchema = !!envSchema;
     return json;
+  };
+
+  /** schema 以数据库为准；旧版本行（envSchema 为空）且版本目录在磁盘时从目录回填 */
+  const getVersionEnvSchema = async ver => {
+    if (ver.envSchema) {
+      return ver.envSchema;
+    }
+    if (!(await hasArtifact(ver))) {
+      return null;
+    }
+    try {
+      const schema = await readEnvSchema(path.join(ver.artifactPath, 'server'));
+      await ver.update({ envSchema: schema });
+      return schema;
+    } catch (e) {
+      return null;
+    }
   };
 
   const uploadVersion = async ({ name, version, label, zipBuffer, fileId }) => {
@@ -338,7 +373,8 @@ module.exports = fp(async (fastify, options) => {
             hasMigration: migrationFiles.length > 0,
             migrationPath: prepared.migrationPath,
             fileId: fileId ? String(fileId) : null,
-            migrationFiles
+            migrationFiles,
+            envSchema: prepared.envSchema
           },
           { transaction }
         );
@@ -579,13 +615,9 @@ module.exports = fp(async (fastify, options) => {
     return results.filter(Boolean);
   };
 
-  const startProcess = async app => {
-    const version = await models.appVersion.findByPk(app.currentVersionId);
-    if (!version) {
-      throw new Error('current version missing');
-    }
+  /** 子进程最终环境变量：宿主透传 → 托管库 → 应用变量 → PORT → resolveSystemEnv；顺带持久化表前缀与系统变量 */
+  const buildProcessEnv = async (app, version) => {
     const serverDir = path.join(version.artifactPath, 'server');
-    const { outFile, errFile } = await ensureLogFiles(app.rootPath);
     const env = mergeEnv({
       passthroughEnvKeys: options.passthroughEnvKeys,
       appEnv: app.env,
@@ -604,6 +636,7 @@ module.exports = fp(async (fastify, options) => {
 
     if (typeof options.resolveSystemEnv === 'function') {
       const systemEnv = await options.resolveSystemEnv({ app, version, serverDir });
+      const injectedKeys = [];
       if (systemEnv && typeof systemEnv === 'object') {
         const persisted = {};
         for (const [key, value] of Object.entries(systemEnv)) {
@@ -611,6 +644,7 @@ module.exports = fp(async (fastify, options) => {
             continue;
           }
           env[key] = String(value);
+          injectedKeys.push(key);
           if ((options.systemEnvKeys || []).includes(key) && app.env?.[key] !== env[key]) {
             persisted[key] = env[key];
           }
@@ -620,7 +654,143 @@ module.exports = fp(async (fastify, options) => {
           await app.reload();
         }
       }
+      // 记下本次由系统注入的键，供环境变量声明接口隐藏（如未配置 ORIGIN 时由宿主补上的值）
+      const recorded = app.options?.injectedEnvKeys || [];
+      if (recorded.length !== injectedKeys.length || recorded.some(key => !injectedKeys.includes(key))) {
+        await app.update({ options: Object.assign({}, app.options || {}, { injectedEnvKeys: injectedKeys }) });
+        await app.reload();
+      }
     }
+    return env;
+  };
+
+  const envSchemaMissingError = () => {
+    const err = new Error(`该版本缺少 server/${ENV_SCHEMA_FILE}，请补充后重新上传`);
+    err.envErrors = [];
+    return err;
+  };
+
+  /** 按版本的 env.schema.json 校验最终环境变量，不通过时抛错（err.envErrors 为 [{ key, message }]） */
+  const assertEnvValid = async (app, version, env) => {
+    const schema = await getVersionEnvSchema(version);
+    if (!schema) {
+      throw envSchemaMissingError();
+    }
+    const errors = validateEnv(schema, env);
+    if (errors.length) {
+      const injected = listInjectedEnvKeys(app);
+      const detail = errors.map(({ key, message }) => `${key}${injected.has(key) ? '（应用中心注入）' : ''} ${message}`).join('；');
+      const err = new Error(`环境变量不符合 ${ENV_SCHEMA_FILE}：${detail}`);
+      err.envErrors = errors;
+      throw err;
+    }
+  };
+
+  /** 应用中心自动注入或在其它页签维护的变量名：环境变量管理中不展示 */
+  const listInjectedEnvKeys = app =>
+    new Set([
+      'PORT',
+      ...SYSTEM_ENV_KEYS,
+      ...(options.systemEnvKeys || []),
+      ...(options.passthroughEnvKeys || []),
+      // 托管库连接由宿主注入，自有库在数据页签配置
+      ...DB_CONNECTION_KEYS,
+      DB_DEDICATED_KEY,
+      ...(app.options?.injectedEnvKeys || [])
+    ]);
+
+  const resolveDeclarationVersion = async (app, versionId) => {
+    if (versionId) {
+      const ver = await models.appVersion.findByPk(versionId);
+      if (!ver || ver.appName !== app.name) {
+        httpError(404, 'version not found');
+      }
+      return ver;
+    }
+    if (app.currentVersionId) {
+      const ver = await models.appVersion.findByPk(app.currentVersionId);
+      if (ver) {
+        return ver;
+      }
+    }
+    return models.appVersion.findOne({ where: { appName: app.name }, order: [['createdAt', 'DESC']] });
+  };
+
+  /**
+   * 环境变量声明：declared 为 schema 中需要用户填写的变量，others 为已配置但未声明的变量；
+   * 两者都不含应用中心注入的变量，密钥值掩码
+   */
+  const getEnvDeclaration = async ({ name, versionId } = {}) => {
+    const app = await getByName(name);
+    const ver = await resolveDeclarationVersion(app, versionId);
+    const schema = ver ? await getVersionEnvSchema(ver) : null;
+    const injected = listInjectedEnvKeys(app);
+    const appEnv = omitSystemEnv(app.env || {}, options.systemEnvKeys);
+    const secretOpts = Object.assign({}, options, { secretEnvKeys: resolveSecretEnvKeys(app) });
+    const isSecret = (key, prop) => !!prop?.writeOnly || isSecretKey(key, options.secretEnvKeyPattern, secretOpts.secretEnvKeys);
+    const maskValue = (key, prop) => {
+      const value = appEnv[key];
+      if (value == null || value === '') {
+        return null;
+      }
+      return isSecret(key, prop) ? SECRET_MASK : value;
+    };
+
+    const properties = schema?.properties || {};
+    const required = new Set(schema?.required || []);
+    const errorMap = new Map();
+    if (schema) {
+      const previewEnv = mergeEnv({
+        passthroughEnvKeys: options.passthroughEnvKeys,
+        appEnv: app.env,
+        port: app.port,
+        defaultAppDb: options.defaultAppDb,
+        appName: app.name
+      });
+      validateEnv(schema, previewEnv)
+        .filter(item => !injected.has(item.key))
+        .forEach(item => errorMap.set(item.key, item.message));
+    }
+
+    const declared = Object.entries(properties)
+      .filter(([key]) => !injected.has(key))
+      .map(([key, prop]) => ({
+        key,
+        type: prop?.type || null,
+        required: required.has(key),
+        default: prop?.default === undefined ? null : prop.default,
+        description: prop?.description || prop?.title || null,
+        enum: Array.isArray(prop?.enum) ? prop.enum : null,
+        secret: isSecret(key, prop),
+        configured: appEnv[key] != null && appEnv[key] !== '',
+        value: maskValue(key, prop),
+        error: errorMap.get(key) || null
+      }));
+
+    const others = Object.keys(appEnv)
+      .filter(key => !injected.has(key) && !Object.prototype.hasOwnProperty.call(properties, key))
+      .map(key => ({ key, secret: isSecret(key), value: maskValue(key) }));
+
+    return {
+      name: app.name,
+      versionId: ver ? String(ver.id) : null,
+      version: ver ? ver.version : null,
+      hasSchema: !!schema,
+      valid: !!schema && errorMap.size === 0,
+      declared,
+      others
+    };
+  };
+
+  const startProcess = async (app, { env: preparedEnv } = {}) => {
+    const version = await models.appVersion.findByPk(app.currentVersionId);
+    if (!version) {
+      throw new Error('current version missing');
+    }
+    const serverDir = path.join(version.artifactPath, 'server');
+    const env = preparedEnv || (await buildProcessEnv(app, version));
+    await assertEnvValid(app, version, env);
+    const { outFile, errFile } = await ensureLogFiles(app.rootPath);
 
     const pathBase = mountPrefix(app.name);
     // Domain-first: inject `/` so custom Host SPA works; path mode then relies on gateway rewrite fallback.
@@ -688,6 +858,8 @@ module.exports = fp(async (fastify, options) => {
           maxZipEntries: options.maxZipEntries,
           npmInstallTimeoutMs: options.npmInstallTimeoutMs,
           sqlPath: options.sqlPath,
+          // 老版本可能没有 env.schema.json：照常还原目录，由启动前的环境变量校验给出提示
+          requireEnvSchema: false,
           onProgress
         });
         await fs.move(stagingPath, ver.artifactPath, { overwrite: true });
@@ -777,6 +949,19 @@ module.exports = fp(async (fastify, options) => {
     }
     progress.report(step, 'done');
 
+    // 变量不合规时不切换版本、不执行迁移、不启动进程
+    step = 'env';
+    progress.report(step, 'running');
+    let processEnv;
+    try {
+      processEnv = await buildProcessEnv(app, ver);
+      await assertEnvValid(app, ver, processEnv);
+    } catch (e) {
+      progress.report(step, 'error', { message: e.message });
+      httpError(400, e.message);
+    }
+    progress.report(step, 'done');
+
     await app.update({
       status: 'deploying',
       currentVersionId: String(ver.id),
@@ -830,13 +1015,13 @@ module.exports = fp(async (fastify, options) => {
 
       if (runMigration === false) {
         // child may honor RUN_SQL_ON_SYNC
-        app.env = Object.assign({}, app.env, { RUN_SQL_ON_SYNC: 'false' });
+        processEnv.RUN_SQL_ON_SYNC = 'false';
       }
 
       step = 'start';
       progress.report(step, 'running');
       const beforeForReady = await snapshotTablesSafe(app);
-      await startProcess(app);
+      await startProcess(app, { env: processEnv });
       progress.report(step, 'done');
       step = 'ready';
       progress.report(step, 'running');
@@ -872,15 +1057,28 @@ module.exports = fp(async (fastify, options) => {
     return toPublicApp(app);
   };
 
-  const start = async ({ name }) => {
-    const app = await getByName(name);
-    if (!app.currentVersionId) {
+  /** 启动 / 重启前先按 schema 校验，不通过直接报错，不改动正在运行的进程与状态 */
+  const prepareStartEnv = async app => {
+    const version = app.currentVersionId ? await models.appVersion.findByPk(app.currentVersionId) : null;
+    if (!version) {
       httpError(400, 'no version deployed');
     }
+    const env = await buildProcessEnv(app, version);
+    try {
+      await assertEnvValid(app, version, env);
+    } catch (e) {
+      httpError(400, e.message);
+    }
+    return env;
+  };
+
+  const start = async ({ name }) => {
+    const app = await getByName(name);
+    const env = await prepareStartEnv(app);
     await app.update({ status: 'deploying', message: null });
     try {
       const beforeTables = await snapshotTablesSafe(app);
-      await startProcess(app);
+      await startProcess(app, { env });
       scheduleStatusSync(app.id, { beforeTables });
       return toPublicApp(await getByName(name));
     } catch (e) {
@@ -891,6 +1089,7 @@ module.exports = fp(async (fastify, options) => {
 
   const restart = async ({ name }) => {
     const app = await getByName(name);
+    const env = await prepareStartEnv(app);
     await app.update({ status: 'deploying', message: null });
     try {
       const beforeTables = await snapshotTablesSafe(app);
@@ -900,7 +1099,7 @@ module.exports = fp(async (fastify, options) => {
       } catch (e) {
         // ignore if not running
       }
-      await startProcess(app);
+      await startProcess(app, { env });
       scheduleStatusSync(app.id, { beforeTables });
       return toPublicApp(await getByName(name));
     } catch (e) {
@@ -1100,6 +1299,9 @@ module.exports = fp(async (fastify, options) => {
       load,
       getLoadStore,
       getDeployProgress: () => deployProgress,
+      waitDeployProgress: ({ name, progressId, timeoutMs }) => deployProgress.wait(name, progressId, { timeoutMs }),
+      getEnvDeclaration,
+      listInjectedEnvKeys,
       toPublicApp,
       mountPrefix,
       findByHost,

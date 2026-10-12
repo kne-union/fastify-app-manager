@@ -34,14 +34,14 @@ const runNpmInstall = (cwd, timeoutMs) =>
   });
 
 /** install=false 时只解压校验，不装依赖（用于不常驻磁盘的版本上传） */
-const prepareVersionArtifact = async ({ zipBuffer, artifactPath, maxZipSize, maxZipEntries, npmInstallTimeoutMs, sqlPath, install = true, onProgress }) => {
+const prepareVersionArtifact = async ({ zipBuffer, artifactPath, maxZipSize, maxZipEntries, npmInstallTimeoutMs, sqlPath, install = true, requireEnvSchema = true, onProgress }) => {
   await fs.emptyDir(artifactPath);
   onProgress && onProgress('extract');
   const extractDir = path.join(artifactPath, '_extract');
   await extractZipSafe(zipBuffer, extractDir, { maxZipSize, maxZipEntries });
   const packageRoot = await resolvePackageRoot(extractDir);
 
-  const validation = await validatePackageRoot(packageRoot);
+  const validation = await validatePackageRoot(packageRoot, { requireEnvSchema });
   if (!validation.ok) {
     await fs.remove(artifactPath);
     throw new Error(`invalid package: ${validation.errors.join('; ')}`);
@@ -72,7 +72,8 @@ const prepareVersionArtifact = async ({ zipBuffer, artifactPath, maxZipSize, max
   return {
     hasMigration: sqlFiles.length > 0,
     migrationPath: sqlPath || 'sql',
-    sqlFiles
+    sqlFiles,
+    envSchema: validation.envSchema
   };
 };
 
