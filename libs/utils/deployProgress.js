@@ -12,8 +12,8 @@ const createDeployProgress = () => {
   emitter.setMaxListeners(0);
   const latest = new Map();
 
-  const begin = (name, progressId) => {
-    const state = { progressId, events: [] };
+  const begin = (name, progressId, { versionId = null, version = null } = {}) => {
+    const state = { progressId, versionId, version, startedAt: new Date().toISOString(), events: [] };
     latest.set(name, state);
     const report = (step, status, { detail = null, message = null } = {}) => {
       const event = { progressId, step, status, detail, message, at: new Date().toISOString() };
@@ -29,6 +29,23 @@ const createDeployProgress = () => {
   const clear = name => latest.delete(name);
 
   const isFinished = event => event.status === 'error' || (event.step === 'ready' && event.status !== 'running');
+
+  /** 尚未结束的最近一次部署；准备部署包阶段应用仍是旧状态与旧版本，需靠它判断哪个版本正在部署 */
+  const active = name => {
+    const state = latest.get(name);
+    if (!state || state.events.some(isFinished)) {
+      return null;
+    }
+    const last = state.events[state.events.length - 1];
+    return {
+      progressId: state.progressId,
+      versionId: state.versionId,
+      version: state.version,
+      startedAt: state.startedAt,
+      step: last ? last.step : null,
+      detail: last ? last.detail : null
+    };
+  };
 
   /** 等到该次部署出错或就绪阶段结束（或超时）；返回 { progressId, ok, timedOut, events } */
   const wait = (name, progressId, { timeoutMs = 120000 } = {}) =>
@@ -57,7 +74,7 @@ const createDeployProgress = () => {
       timer = setTimeout(() => finish(true), timeoutMs);
     });
 
-  return { emitter, begin, snapshot, clear, wait };
+  return { emitter, begin, snapshot, active, clear, wait };
 };
 
 module.exports = {

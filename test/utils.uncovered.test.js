@@ -21,6 +21,21 @@ const { createMockPm2 } = require('./helpers/mockPm2');
 describe('uncovered utils', function () {
   this.timeout(20000);
 
+  describe('deployProgress active', () => {
+    it('should expose the deploying version until the deploy settles', () => {
+      const { createDeployProgress } = require('../libs/utils/deployProgress');
+      const progress = createDeployProgress();
+      expect(progress.active('demo')).to.equal(null);
+      const { report } = progress.begin('demo', 'p-1', { versionId: '9', version: '1.2.3' });
+      report('package', 'running', { detail: 'install' });
+      expect(progress.active('demo')).to.include({ progressId: 'p-1', versionId: '9', version: '1.2.3', step: 'package', detail: 'install' });
+      report('ready', 'done');
+      expect(progress.active('demo')).to.equal(null);
+      progress.begin('demo', 'p-2', { versionId: '10', version: '1.2.4' }).report('env', 'error', { message: 'bad env' });
+      expect(progress.active('demo')).to.equal(null);
+    });
+  });
+
   describe('mergePm2Config', () => {
     it('should merge allowed pm2 keys only', () => {
       const merged = mergePm2Config({ instances: 1, exec_mode: 'fork' }, { instances: 2, name: 'x', kill_timeout: 1000 });

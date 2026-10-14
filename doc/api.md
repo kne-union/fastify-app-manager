@@ -360,6 +360,8 @@ data: {"progressId":"p-1","step":"ready","status":"done","detail":null,"message"
 |--------|------|------|------|
 | name | string | 是 | 应用 slug |
 
+返回脱敏后的应用对象，另带 `deployment`：最近一次部署尚未结束（未出错、就绪阶段未完成）时为 `{ progressId, versionId, version, startedAt, step, detail }`，否则为 `null`。准备部署包阶段应用仍是旧的 `status` 与 `currentVersionId`，用它判断哪个版本正在部署。`app/list` 的每个元素同样带该字段。
+
 #### POST `{prefix}/app/start` | `stop` | `restart` | `remove`
 
 | 参数名 | 类型 | 必填 | 说明 |
