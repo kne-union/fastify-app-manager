@@ -1163,6 +1163,9 @@ describe('plugin integration', function () {
 
     const replay = fastify.appManager.services.app.getDeployProgress().snapshot('prog');
     expect(replay.events).to.have.length(10);
+    expect(replay).to.include({ versionId: String(version.id), version: '1.0.0' });
+    const detail = await fastify.inject({ method: 'GET', url: '/api/v1/app-manager/app/detail?name=prog' });
+    expect(detail.json().deployment).to.equal(null);
   });
 
   it('should reject packages without env.schema.json', async () => {

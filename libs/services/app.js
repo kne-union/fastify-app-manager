@@ -241,7 +241,7 @@ module.exports = fp(async (fastify, options) => {
       order: [['createdAt', 'DESC']]
     });
     return {
-      pageData: rows.map(toPublicApp),
+      pageData: rows.map(row => Object.assign(toPublicApp(row), { deployment: deployProgress.active(row.name) })),
       totalCount: count
     };
   };
@@ -265,7 +265,7 @@ module.exports = fp(async (fastify, options) => {
 
   const detail = async ({ name }) => {
     const app = await getByName(name);
-    return toPublicApp(app);
+    return Object.assign(toPublicApp(app), { deployment: deployProgress.active(app.name) });
   };
 
   const versionSqlDir = ver => path.join(ver.artifactPath, 'server', ver.migrationPath || options.sqlPath || 'sql');
@@ -938,7 +938,7 @@ module.exports = fp(async (fastify, options) => {
       httpError(404, 'version not found');
     }
 
-    const progress = deployProgress.begin(app.name, progressId || crypto.randomUUID());
+    const progress = deployProgress.begin(app.name, progressId || crypto.randomUUID(), { versionId: String(ver.id), version: ver.version });
     let step = 'package';
     progress.report(step, 'running');
     try {
