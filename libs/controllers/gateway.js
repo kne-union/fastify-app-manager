@@ -1,5 +1,7 @@
 const fp = require('fastify-plugin');
+const http = require('node:http');
 const { Readable } = require('node:stream');
+const httpProxy = require('http-proxy');
 const { rewriteLocation, rewriteSetCookiePath, shouldRewriteBody, rewriteBody, tagEtag, restoreConditionalHeaders } = require('../utils/pathRewrite');
 const { wantsHtml, renderUnavailablePage, getStatusText } = require('../utils/unavailablePage');
 
@@ -7,17 +9,20 @@ module.exports = fp(async (fastify, options) => {
   const ns = options.name;
   const pathPrefix = options.pathPrefix.replace(/\/$/, '') || '/app';
 
-  const proxyToApp = async (request, reply, app, { stripPrefix } = {}) => {
-    let targetPath = request.raw.url || '/';
-    if (stripPrefix) {
-      const mount = `${pathPrefix}/${app.name}`;
-      if (targetPath === mount || targetPath.startsWith(mount + '/') || targetPath.startsWith(mount + '?')) {
-        targetPath = targetPath.slice(mount.length) || '/';
-        if (!targetPath.startsWith('/')) {
-          targetPath = `/${targetPath}`;
-        }
-      }
+  const pathMatcher = new RegExp(`^${pathPrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/([^/?#]+)`);
+
+  const stripMountPrefix = (url, appName) => {
+    const mount = `${pathPrefix}/${appName}`;
+    if (url === mount || url.startsWith(mount + '/') || url.startsWith(mount + '?')) {
+      const rest = url.slice(mount.length) || '/';
+      return rest.startsWith('/') ? rest : `/${rest}`;
     }
+    return url;
+  };
+
+  const proxyToApp = async (request, reply, app, { stripPrefix } = {}) => {
+    const rawUrl = request.raw.url || '/';
+    const targetPath = stripPrefix ? stripMountPrefix(rawUrl, app.name) : rawUrl;
 
     const dest = `http://127.0.0.1:${app.port}${targetPath}`;
     const mountPrefix = `${pathPrefix}/${app.name}`;
@@ -128,7 +133,7 @@ module.exports = fp(async (fastify, options) => {
       return byHost.status === 'running' ? proxyToApp(request, reply, byHost, { stripPrefix: false }) : replyUnavailable(request, reply, byHost);
     }
 
-    const match = url.match(new RegExp(`^${pathPrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/([^/?#]+)`));
+    const match = url.match(pathMatcher);
     if (match) {
       const appName = decodeName(match[1]);
       const app = await services.app.findByPathName(appName, { running: false });
@@ -137,5 +142,69 @@ module.exports = fp(async (fastify, options) => {
       }
       return replyUnavailable(request, reply, { name: appName, status: 'missing' });
     }
+  });
+
+  const wsProxy = httpProxy.createProxyServer({ changeOrigin: true });
+
+  const rejectUpgrade = (socket, statusCode) => {
+    if (!socket.writable) {
+      return socket.destroy();
+    }
+    socket.end(`HTTP/1.1 ${statusCode} ${http.STATUS_CODES[statusCode]}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+  };
+
+  const resolveUpgradeTarget = async req => {
+    const url = req.url || '/';
+    if (url.startsWith(options.prefix)) {
+      return null;
+    }
+    const services = fastify[ns]?.services;
+    if (!services?.app) {
+      return null;
+    }
+    const byHost = await services.app.findByHost(req.headers.host, { running: false });
+    if (byHost) {
+      return { app: byHost, targetPath: url };
+    }
+    const match = url.match(pathMatcher);
+    if (!match) {
+      return null;
+    }
+    const appName = decodeName(match[1]);
+    const app = await services.app.findByPathName(appName, { running: false });
+    return { app: app || { name: appName, status: 'missing' }, targetPath: stripMountPrefix(url, appName) };
+  };
+
+  // reply-from only speaks plain HTTP, so WebSocket handshakes under an app go through http-proxy instead.
+  const onUpgrade = async (req, socket, head) => {
+    socket.on('error', () => socket.destroy());
+    let target;
+    try {
+      target = await resolveUpgradeTarget(req);
+    } catch (error) {
+      fastify.log.error(error);
+      return rejectUpgrade(socket, 502);
+    }
+    if (!target) {
+      return;
+    }
+    // Node servers allow half-open sockets; once our side has finished writing (tunnel ended or upgrade declined) drop the connection.
+    socket.once('finish', () => socket.destroy());
+    const { app, targetPath } = target;
+    if (app.status !== 'running') {
+      return rejectUpgrade(socket, app.status === 'missing' ? 404 : 503);
+    }
+
+    req.url = targetPath;
+    wsProxy.ws(req, socket, head, { target: `http://127.0.0.1:${app.port}` }, error => {
+      fastify.log.warn({ err: error, app: app.name }, 'websocket upgrade proxy failed');
+      rejectUpgrade(socket, 502);
+    });
+  };
+
+  fastify.server.on('upgrade', onUpgrade);
+  fastify.addHook('onClose', async () => {
+    fastify.server.removeListener('upgrade', onUpgrade);
+    wsProxy.close();
   });
 });
