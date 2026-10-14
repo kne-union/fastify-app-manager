@@ -463,6 +463,74 @@ describe('plugin integration', function () {
     expect(JSON.parse(viaGet.body).body).to.equal('');
   });
 
+  it('should tunnel websocket upgrades through the path gateway', async () => {
+    await fastify.inject({
+      method: 'POST',
+      url: '/api/v1/app-manager/app/create',
+      payload: { name: 'wsapp', label: 'WS' }
+    });
+    const row = await fastify.appManager.models.app.findOne({ where: { name: 'wsapp' } });
+    await row.update({ status: 'running' });
+
+    const upgradedUrls = [];
+    backend = http.createServer((req, res) => {
+      res.writeHead(401, { 'Content-Type': 'text/plain' });
+      res.end('unauthorized');
+    });
+    backend.on('upgrade', (req, socket) => {
+      upgradedUrls.push(req.url);
+      if (!req.url.includes('token=ok')) {
+        socket.end('HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n');
+        return;
+      }
+      socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n');
+      socket.on('data', chunk => socket.write(chunk));
+      socket.on('end', () => socket.end());
+    });
+    await new Promise((resolve, reject) => {
+      backend.listen(row.port, '127.0.0.1', err => (err ? reject(err) : resolve()));
+    });
+
+    const address = await fastify.listen({ port: 0, host: '127.0.0.1' });
+    const { port } = new URL(address);
+    const openUpgrade = urlPath =>
+      new Promise((resolve, reject) => {
+        const req = http.request({
+          host: '127.0.0.1',
+          port,
+          path: urlPath,
+          agent: false,
+          headers: { Connection: 'Upgrade', Upgrade: 'websocket', 'Sec-WebSocket-Version': '13', 'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==' }
+        });
+        req.on('upgrade', (res, socket) => resolve({ upgraded: true, statusCode: res.statusCode, socket }));
+        req.on('response', res => {
+          res.resume();
+          resolve({ upgraded: false, statusCode: res.statusCode });
+        });
+        req.on('error', reject);
+        req.end();
+      });
+
+    const ok = await openUpgrade('/app/wsapp/api/v1/im/ws?token=ok');
+    expect(ok.upgraded).to.equal(true);
+    expect(ok.statusCode).to.equal(101);
+    const echoed = await new Promise(resolve => {
+      ok.socket.once('data', chunk => resolve(chunk.toString('utf8')));
+      ok.socket.write('ping');
+    });
+    expect(echoed).to.equal('ping');
+    ok.socket.destroy();
+    expect(upgradedUrls[0]).to.equal('/api/v1/im/ws?token=ok');
+
+    const denied = await openUpgrade('/app/wsapp/api/v1/im/ws?token=bad');
+    expect(denied.upgraded).to.equal(false);
+    expect(denied.statusCode).to.equal(401);
+
+    const missing = await openUpgrade('/app/nope/ws');
+    expect(missing.upgraded).to.equal(false);
+    expect(missing.statusCode).to.equal(404);
+  });
+
   it('should pass app JSON responses through host onSend envelopes untouched', async () => {
     const host = Fastify({ logger: false });
     try {
