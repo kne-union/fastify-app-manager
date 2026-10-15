@@ -126,6 +126,7 @@ deploy(versionId)
 | 版本上传 | Zip Slip 防护、条目数/体积上限、解压丢弃任意层级 `node_modules`、Fullstack 包格式校验、server 生产依赖安装 |
 | 短部署 | `deploy` / `start` / `restart` 立即返回 `deploying`，后台按 PM2 真实状态 + healthCheck 写回 `running`/`error`/`stopped` |
 | 部署进度 | `deploy` 按「准备部署包 → 校验环境变量 → SQL 迁移 → 启动进程 → 等待就绪」上报阶段，经 `GET .../app/deploy/stream` SSE 推送（含下载 / 解压 / 安装依赖等子阶段） |
+| 部署记录 | 每次部署（含父应用启动时补回部署目录）落库：状态 `running`/`success`/`failed`、阶段事件、部署日志（依赖安装输出、就绪失败时进程 `err.log` 末尾）；父应用重启后未结束的标为中断；`GET .../app/deploy/list`、`.../app/deploy/detail` 查询 |
 | 生命周期 | `start` / `stop` / `restart` / `remove`；父应用重启后异步 `syncAllStatuses` 对齐 PM2 |
 | 双通道访问 | 自定义域名透明反代 + `/app/{name}` 剥前缀反代 |
 | 日志 | PM2 落盘 + 历史分页（`beforeLine` 上滚、每页最多 100 行）+ SSE（含回放行与心跳） |
@@ -213,6 +214,9 @@ await fastify.listen({ port: 3000 });
 | `maxZipSize` | number | 否 | `209715200` | zip 最大字节（200MB）；同步 multipart 限制 |
 | `maxZipEntries` | number | 否 | `20000` | zip 最大条目数（不含被丢弃的 `node_modules` 条目） |
 | `npmInstallTimeoutMs` | number | 否 | `600000` | `server` 目录 `npm install` 超时 |
+| `deployRecordKeep` | number | 否 | `20` | 每个应用保留的部署记录条数 |
+| `deployLogMaxLines` | number | 否 | `2000` | 单次部署日志最多保留行数（超出丢弃最早的） |
+| `deployErrorLogTailLines` | number | 否 | `50` | 就绪失败时附加到部署日志的进程 `err.log` 末尾行数 |
 | `sseReplayLines` | number | 否 | `100` | SSE 连接时回放最近行数 |
 | `sseHeartbeatMs` | number | 否 | `15000` | SSE 心跳间隔 |
 | `logMaxSize` | number | 否 | `52428800` | 单日志文件上限（50MB），达到即切分；`0` 关闭按大小切分 |
@@ -459,7 +463,7 @@ await fastify.listen({ port: 3000 });
 
 ##### GET `{prefix}/app/deploy/stream`
 
-SSE 部署进度。连接时先推送 `snapshot`（该应用最近一次部署中匹配 `progressId` 的已有事件，便于断线重连），之后每个阶段变化推送 `progress`。每个应用只在内存中保留最近一次部署的事件。
+SSE 部署进度。连接时先推送 `snapshot`（该次部署已有事件，便于断线重连；内存中没有时从部署记录回放，`deploy` 为该部署记录含最近 `sseReplayLines` 行日志，无记录为 `null`），之后每个阶段变化推送 `progress`，每行部署日志推送 `log`（`{ progressId, line }`）。
 
 | 参数名 | 类型 | 必填 | 说明 |
 |--------|------|------|------|
@@ -480,7 +484,7 @@ SSE 部署进度。连接时先推送 `snapshot`（该应用最近一次部署�
 
 ```text
 event: snapshot
-data: {"steps":["package","env","migrate","start","ready"],"events":[]}
+data: {"steps":["package","env","migrate","start","ready"],"events":[],"deploy":null}
 
 event: progress
 data: {"progressId":"p-1","step":"package","status":"running","detail":"download","message":null,"at":"2026-10-10T10:00:00.000Z"}
@@ -488,6 +492,27 @@ data: {"progressId":"p-1","step":"package","status":"running","detail":"download
 event: progress
 data: {"progressId":"p-1","step":"ready","status":"done","detail":null,"message":null,"at":"2026-10-10T10:00:05.000Z"}
 ```
+
+##### 部署记录
+
+每次部署（含父应用启动时补回部署目录，`source: 'restore'`）都会落库，每个应用保留最近 `deployRecordKeep` 条。父应用重启时，未结束的记录标为 `failed`（`message: deploy interrupted: app manager restarted`）。应用详情返回 `deployment`（进行中的部署，无则 `null`）与 `lastDeployment`（最近一次部署记录摘要）。
+
+| 方法 | 路径 | 参数 | 说明 |
+|------|------|------|------|
+| GET | `{prefix}/app/deploy/list` | `name`, `perPage?`, `currentPage?` | 部署记录分页（不含日志与事件），按开始时间倒序 |
+| GET | `{prefix}/app/deploy/detail` | `name`, `progressId?`, `logLines?` | 部署记录详情；`progressId` 为空取最近一次；`logLines` 只取最后 N 行（`0` 全部） |
+
+部署记录字段：
+
+| 字段 | 说明 |
+|------|------|
+| `progressId` / `versionId` / `version` | 部署标识与版本 |
+| `source` | `deploy` 手动部署 / `restore` 启动时补回部署目录 |
+| `status` | `running` / `success` / `failed` |
+| `step` / `message` | 最后到达的阶段 / 失败原因 |
+| `startedAt` / `finishedAt` | 起止时间 |
+| `events` | 阶段事件（仅详情） |
+| `log` / `logTotalLines` | 部署日志：各阶段结果、依赖安装输出、就绪失败时进程 `err.log` 末尾（仅详情） |
 
 ##### 版本迁移脚本管理
 
@@ -546,6 +571,8 @@ data: {"progressId":"p-1","step":"ready","status":"done","detail":null,"message"
 | 参数名 | 类型 | 必填 | 说明 |
 |--------|------|------|------|
 | name | string | 是 | 应用 slug |
+
+返回脱敏后的应用对象，另带 `deployment`：最近一次部署尚未结束（未出错、就绪阶段未完成）时为 `{ progressId, versionId, version, startedAt, step, detail }`，否则为 `null`。准备部署包阶段应用仍是旧的 `status` 与 `currentVersionId`，用它判断哪个版本正在部署。`app/list` 的每个元素同样带该字段。
 
 ##### POST `{prefix}/app/start` | `stop` | `restart` | `remove`
 
@@ -731,7 +758,11 @@ data: {"name":"demo","ts":1791456608533,...}
 | `restoreMissingArtifacts()` | 当前版本目录（`artifactPath/server`）缺失时，按版本 `fileId` 经 `resolveVersionFile` 取回 zip 重建并恢复 `current` 链接（不跑 SQL 迁移）；返回 `[{ name, version, action: 'restored' \| 'skipped' \| 'failed', reason? }]`，无 `fileId` 的记 `skipped` |
 | `listVersions({ name, perPage, currentPage })` | 版本列表 |
 | `deploy({ name, versionId, version, runMigration, migrations?, progressId? })` | 部署；版本目录缺失时先从宿主文件重建，启动后清理其它版本目录；立即 `deploying`，后台 `syncRealStatus`；各阶段进度写入 `getDeployProgress()` |
-| `getDeployProgress()` | 部署进度中心：`emitter`（事件名 `deploy:{name}`）、`snapshot(name)` 返回最近一次部署 `{ progressId, events }` |
+| `getDeployProgress()` | 部署进度中心：`emitter`（事件名 `deploy:{name}`、日志 `deploy-log:{name}`）、`snapshot(name)` 返回最近一次部署 `{ progressId, status, events, ... }`、`active(name)` 进行中的部署 |
+| `deployList({ name, perPage?, currentPage? })` | 同 `GET .../app/deploy/list` |
+| `deployDetail({ name, progressId?, logLines? })` | 同 `GET .../app/deploy/detail` |
+| `lastDeployment(name)` | 最近一次部署记录摘要（无日志），无记录为 `null` |
+| `markInterruptedDeploys()` | 把库里仍 `running`、但本进程未在跟踪的部署记录标为 `failed`（启动时自动调用），返回条数 |
 | `waitDeployProgress({ name, progressId, timeoutMs? })` | 等到该次部署出错或 `ready` 结束（默认超时 120000ms），返回 `{ progressId, ok, timedOut, events }`；供 MCP 等同步调用方使用 |
 | `getEnvDeclaration({ name, versionId? })` | 同 `GET .../app/env/schema` |
 | `listInjectedEnvKeys(app)` | 应用中心注入（或在其它页签维护）的变量名 `Set`，环境变量声明中不展示 |

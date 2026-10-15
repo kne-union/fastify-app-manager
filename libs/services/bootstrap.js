@@ -1,5 +1,6 @@
 const fp = require('fastify-plugin');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const fs = require('fs-extra');
 const { EventEmitter } = require('node:events');
 const pm2Util = require('../utils/pm2');
@@ -136,17 +137,28 @@ module.exports = fp(async (fastify, options) => {
     const { services } = fastify[options.name];
     const results = [];
     for (const item of missing) {
-      const result = await services.app.restoreArtifact(item);
+      const { app, ver } = item;
+      const progress = services.app.getDeployProgress().begin(app.name, crypto.randomUUID(), { versionId: String(ver.id), version: ver.version, source: 'restore' });
+      const result = await services.app.restoreArtifact(Object.assign({}, item, { progress }));
       results.push(result);
-      const { app } = item;
       const wasActive = app.status === 'running' || app.status === 'deploying';
       try {
         const synced = await services.app.syncStatus({ name: app.name, recoverIfMissing: result.action === 'restored' && wasActive });
         if (result.action !== 'restored' && wasActive && synced?.status !== 'running') {
           await app.update({ status: 'error', message: `current version artifact missing: ${result.reason}` });
         }
+        if (!progress.finished()) {
+          if (!wasActive) {
+            progress.report('ready', 'skipped');
+          } else {
+            await services.app.settleDeployReady(app, progress, synced);
+          }
+        }
       } catch (e) {
         fastify.log.warn({ err: e, app: app.name }, 'sync status after artifact restore failed');
+        if (!progress.finished()) {
+          progress.report('ready', 'error', { message: e.message });
+        }
       }
     }
     return results;
@@ -154,6 +166,7 @@ module.exports = fp(async (fastify, options) => {
 
   const recoverOnStartup = async () => {
     const { services } = fastify[options.name];
+    await services.app.markInterruptedDeploys().catch(err => fastify.log.warn({ err }, 'mark interrupted deploys failed'));
     const missing = await services.app.listMissingArtifacts();
     // 两路并行：部署目录完好的应用不必等其它应用重装依赖
     const [reconciled, restored] = await Promise.all([
