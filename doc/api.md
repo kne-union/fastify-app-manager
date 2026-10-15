@@ -684,7 +684,7 @@ data: {"name":"demo","ts":1791456608533,...}
 | 应用不存在 | `/app/{name}` 下找不到应用时返回 404「应用不存在」页（带返回首页）或 JSON（`appStatus: 'missing'`）；`pathPrefix` 之外以及未绑定的域名仍交给宿主路由 |
 | Location | 相对路径前缀补上 `/app/{name}` |
 | Set-Cookie | `Path=/` 改为 `Path=/app/{name}` |
-| Body | 对文本类 Content-Type，将 `"/static/`、`"/api/`、`"/account/` 等前缀改写；有 `content-encoding` 时跳过 |
+| Body | 对文本类 Content-Type，将 `"/static/`、`"/api/`、`"/account/` 等前缀改写；有 `content-encoding` 时跳过；JS 脚本与 `text/event-stream`（SSE 不结束的流）原样流式透传 |
 
 #### 日志切分与归档
 
