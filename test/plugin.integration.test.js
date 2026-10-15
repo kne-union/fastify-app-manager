@@ -102,6 +102,19 @@ describe('plugin integration', function () {
     await fs.remove(appsRoot).catch(() => {});
   });
 
+  it('should store an empty domain as null so several apps can save without a domain', async () => {
+    for (const name of ['nodomain-a', 'nodomain-b']) {
+      const created = await fastify.inject({ method: 'POST', url: '/api/v1/app-manager/app/create', payload: { name, label: name, domain: null } });
+      expect(created.statusCode).to.equal(200);
+      const saved = await fastify.inject({ method: 'POST', url: '/api/v1/app-manager/app/save', payload: { name, label: `${name}-2`, domain: null } });
+      expect(saved.statusCode).to.equal(200);
+      expect(saved.json().domain).to.equal(null);
+    }
+    const cleared = await fastify.inject({ method: 'POST', url: '/api/v1/app-manager/app/save', payload: { name: 'nodomain-a', domain: '' } });
+    expect(cleared.statusCode).to.equal(200);
+    expect(cleared.json().domain).to.equal(null);
+  });
+
   it('should create list update env and reject duplicates', async () => {
     const created = await fastify.inject({
       method: 'POST',

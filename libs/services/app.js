@@ -181,6 +181,10 @@ module.exports = fp(async (fastify, options) => {
       }
       patch[k] = v;
     }
+    // 空域名存 null：domain 有唯一约束，多个应用存 '' 会冲突
+    if (patch.domain !== undefined) {
+      patch.domain = patch.domain || null;
+    }
     if (patch.domain) {
       const domainTaken = await models.app.findOne({ where: { domain: patch.domain } });
       if (domainTaken && domainTaken.name !== name) {
