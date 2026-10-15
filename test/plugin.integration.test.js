@@ -463,6 +463,41 @@ describe('plugin integration', function () {
     expect(JSON.parse(viaGet.body).body).to.equal('');
   });
 
+  it('should stream server-sent events through the path gateway without buffering', async () => {
+    await fastify.inject({ method: 'POST', url: '/api/v1/app-manager/app/create', payload: { name: 'sseapp', label: 'SSE' } });
+    const row = await fastify.appManager.models.app.findOne({ where: { name: 'sseapp' } });
+    await row.update({ status: 'running' });
+
+    const responses = [];
+    backend = http.createServer((req, res) => {
+      responses.push(res);
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
+      res.write('data: {"url":"/api/v1/task"}\n\n');
+    });
+    await new Promise((resolve, reject) => {
+      backend.listen(row.port, '127.0.0.1', err => (err ? reject(err) : resolve()));
+    });
+
+    const address = await fastify.listen({ port: 0, host: '127.0.0.1' });
+    const first = await new Promise((resolve, reject) => {
+      const req = http.get(`${address}/app/sseapp/api/v1/task/statistics/sse`, { headers: { accept: 'text/event-stream' } }, res => {
+        res.setEncoding('utf8');
+        res.once('data', chunk => {
+          req.destroy();
+          resolve({ status: res.statusCode, contentType: res.headers['content-type'], chunk });
+        });
+      });
+      req.on('error', err => (err.code === 'ECONNRESET' ? null : reject(err)));
+      setTimeout(() => {
+        req.destroy();
+        reject(new Error('sse event not forwarded before the stream ended'));
+      }, 3000);
+    }).finally(() => responses.forEach(res => res.end()));
+    expect(first.status).to.equal(200);
+    expect(first.contentType).to.include('text/event-stream');
+    expect(first.chunk).to.equal('data: {"url":"/api/v1/task"}\n\n');
+  });
+
   it('should tunnel websocket upgrades through the path gateway', async () => {
     await fastify.inject({
       method: 'POST',

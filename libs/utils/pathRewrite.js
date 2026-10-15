@@ -31,7 +31,10 @@ const TEXTUAL_TYPES = /text\/|json|xml|svg/i;
 // 前端脚本已按注入的 runtimePublicUrl / runtimeApiUrl 自行拼前缀（如 axios baseURL + '/api/...'），再改写会得到 /app/x/app/x/api
 const SCRIPT_TYPES = /javascript|ecmascript/i;
 
-const shouldRewriteBody = contentType => TEXTUAL_TYPES.test(contentType || '') && !SCRIPT_TYPES.test(contentType || '');
+// SSE 是不结束的流，读完再改写会让客户端一直收不到响应
+const STREAM_TYPES = /text\/event-stream/i;
+
+const shouldRewriteBody = contentType => TEXTUAL_TYPES.test(contentType || '') && !SCRIPT_TYPES.test(contentType || '') && !STREAM_TYPES.test(contentType || '');
 
 const rewriteBody = (body, mountPrefix, prefixes = ['/static', '/api', '/account']) => {
   if (!body || !mountPrefix) {

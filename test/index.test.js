@@ -172,6 +172,8 @@ describe('@kne/fastify-app-manager', function () {
       expect(shouldRewriteBody('text/javascript')).to.equal(false);
       expect(shouldRewriteBody('text/html; charset=utf-8')).to.equal(true);
       expect(shouldRewriteBody('application/json')).to.equal(true);
+      expect(shouldRewriteBody('text/event-stream')).to.equal(false);
+      expect(shouldRewriteBody('text/event-stream; charset=utf-8')).to.equal(false);
     });
 
     it('should version etags and drop conditional headers from stale caches', () => {
