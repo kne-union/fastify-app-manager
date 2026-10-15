@@ -118,6 +118,13 @@ describe('system env hooks', function () {
     await fs.remove(appsRoot).catch(() => {});
   });
 
+  // 就绪检查在部署请求返回后才结束，期间同应用不能再部署
+  const waitDeploySettled = async name => {
+    for (let i = 0; i < 200 && fastify.appManager.services.app.getDeployProgress().active(name); i++) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  };
+
   const createAndDeploy = async name => {
     const created = await fastify.inject({
       method: 'POST',
@@ -133,6 +140,7 @@ describe('system env hooks', function () {
       payload: { name, versionId: String(uploaded.json().id) }
     });
     expect(deployed.statusCode).to.equal(200);
+    await waitDeploySettled(name);
     return uploaded.json();
   };
 
@@ -300,6 +308,36 @@ describe('system env hooks', function () {
     expect(mockPm2.__store.has('app-manager__slow')).to.equal(true);
   });
 
+  it('should reject a deploy while another deploy of the same app is running', async () => {
+    const { services } = fastify.appManager;
+    await fastify.inject({ method: 'POST', url: '/api/v1/app-manager/app/create', payload: { name: 'single', label: 'single' } });
+    const zipBuffer = await buildPackageZip();
+    const upload = async version => {
+      hostFiles.set(`file-single-${version}`, zipBuffer);
+      return (
+        await fastify.inject({ method: 'POST', url: '/api/v1/app-manager/app/version/upload', payload: { name: 'single', version, fileId: `file-single-${version}` } })
+      ).json();
+    };
+    const v1 = await upload('1.0.0');
+    const v2 = await upload('2.0.0');
+    let release;
+    hostFiles.set('file-single-1.0.0', new Promise(resolve => (release = resolve)).then(() => zipBuffer));
+
+    const first = fastify.inject({ method: 'POST', url: '/api/v1/app-manager/app/deploy', payload: { name: 'single', versionId: String(v1.id) } });
+    for (let i = 0; i < 100 && !services.app.getDeployProgress().active('single'); i++) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    expect(services.app.getDeployProgress().active('single')).to.include({ version: '1.0.0' });
+
+    const second = await fastify.inject({ method: 'POST', url: '/api/v1/app-manager/app/deploy', payload: { name: 'single', versionId: String(v2.id) } });
+    expect(second.statusCode).to.equal(409);
+    expect(second.json().message).to.include('deploying version 1.0.0');
+    expect(services.app.getDeployProgress().active('single')).to.include({ version: '1.0.0' });
+
+    release();
+    expect((await first).statusCode).to.equal(200);
+  });
+
   it('should keep only the current version on disk and extract others from host files on deploy', async () => {
     const { models } = fastify.appManager;
     await fastify.inject({ method: 'POST', url: '/api/v1/app-manager/app/create', payload: { name: 'lean', label: 'lean' } });
@@ -316,6 +354,7 @@ describe('system env hooks', function () {
     const deploy = async versionId => {
       const res = await fastify.inject({ method: 'POST', url: '/api/v1/app-manager/app/deploy', payload: { name: 'lean', versionId: String(versionId) } });
       expect(res.statusCode).to.equal(200);
+      await waitDeploySettled('lean');
     };
 
     const v1 = await upload('1.0.0', { '001_init.sql': 'SELECT 1;' });
@@ -373,6 +412,7 @@ describe('system env hooks', function () {
       await fastify.inject({ method: 'POST', url: '/api/v1/app-manager/app/version/upload', payload: { name: 'mixed', version: '2.0.0', fileId: 'file-mixed-2' } })
     ).json();
     await fastify.inject({ method: 'POST', url: '/api/v1/app-manager/app/deploy', payload: { name: 'mixed', versionId: String(v2.id) } });
+    await waitDeploySettled('mixed');
 
     // 无 fileId 的版本无处重建，目录保留；旧版本行读列表时把 SQL 回填进库
     expect(await fs.pathExists(path.join(legacy.artifactPath, 'server'))).to.equal(true);
@@ -386,6 +426,7 @@ describe('system env hooks', function () {
     await models.appVersion.update({ fileId: null }, { where: { id: v2.id } });
     await fs.remove(v2.artifactPath);
     await fastify.inject({ method: 'POST', url: '/api/v1/app-manager/app/deploy', payload: { name: 'mixed', versionId: String(legacy.id) } });
+    await waitDeploySettled('mixed');
     const failed = await fastify.inject({ method: 'POST', url: '/api/v1/app-manager/app/deploy', payload: { name: 'mixed', versionId: String(v2.id) } });
     expect(failed.statusCode).to.equal(400);
     expect(failed.json().message).to.match(/cannot be restored without fileId/);

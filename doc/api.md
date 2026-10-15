@@ -240,7 +240,7 @@
 
 #### POST `{prefix}/app/deploy`
 
-选择版本部署。版本目录不在磁盘时先经 `resolveVersionFile` 取回 zip 解压并 `npm install`（耗时，取不回返回 400 且不改应用状态），再以数据库中的 SQL 覆盖目录内 `.sql`；接着按版本的 `env.schema.json` 校验最终环境变量（含注入的变量），版本没有 schema 或变量不合规时返回 400，且不切换版本、不执行迁移、不启动进程；随后立即返回 `deploying`，后台做健康检查。进程启动后删除该应用其它有 `fileId` 的版本目录（只保留当前版本）。
+选择版本部署。同一应用同时只能有一个部署：已有部署未结束（含就绪检查阶段）时返回 409，不影响进行中的部署。版本目录不在磁盘时先经 `resolveVersionFile` 取回 zip 解压并 `npm install`（耗时，取不回返回 400 且不改应用状态），再以数据库中的 SQL 覆盖目录内 `.sql`；接着按版本的 `env.schema.json` 校验最终环境变量（含注入的变量），版本没有 schema 或变量不合规时返回 400，且不切换版本、不执行迁移、不启动进程；随后立即返回 `deploying`，后台做健康检查。进程启动后删除该应用其它有 `fileId` 的版本目录（只保留当前版本）。
 
 | 参数名 | 类型 | 必填 | 默认值 | 说明 |
 |--------|------|------|--------|------|
@@ -569,7 +569,7 @@ data: {"name":"demo","ts":1791456608533,...}
 | `pruneAllVersionArtifacts()` | 对所有应用执行 `pruneVersionArtifacts` |
 | `restoreMissingArtifacts()` | 当前版本目录（`artifactPath/server`）缺失时，按版本 `fileId` 经 `resolveVersionFile` 取回 zip 重建并恢复 `current` 链接（不跑 SQL 迁移）；返回 `[{ name, version, action: 'restored' \| 'skipped' \| 'failed', reason? }]`，无 `fileId` 的记 `skipped` |
 | `listVersions({ name, perPage, currentPage })` | 版本列表 |
-| `deploy({ name, versionId, version, runMigration, migrations?, progressId? })` | 部署；版本目录缺失时先从宿主文件重建，启动后清理其它版本目录；立即 `deploying`，后台 `syncRealStatus`；各阶段进度写入 `getDeployProgress()` |
+| `deploy({ name, versionId, version, runMigration, migrations?, progressId? })` | 部署；同一应用已有部署未结束时 409；版本目录缺失时先从宿主文件重建，启动后清理其它版本目录；立即 `deploying`，后台 `syncRealStatus`；各阶段进度写入 `getDeployProgress()` |
 | `getDeployProgress()` | 部署进度中心：`emitter`（事件名 `deploy:{name}`、日志 `deploy-log:{name}`）、`snapshot(name)` 返回最近一次部署 `{ progressId, status, events, ... }`、`active(name)` 进行中的部署 |
 | `deployList({ name, perPage?, currentPage? })` | 同 `GET .../app/deploy/list` |
 | `deployDetail({ name, progressId?, logLines? })` | 同 `GET .../app/deploy/detail` |
