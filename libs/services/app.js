@@ -1089,6 +1089,11 @@ module.exports = fp(async (fastify, options) => {
       httpError(404, 'version not found');
     }
 
+    // 判断与登记之间不能有 await，否则并发请求会同时通过
+    const running = deployProgress.active(app.name);
+    if (running) {
+      httpError(409, `app ${app.name} is deploying version ${running.version}`);
+    }
     const progress = deployProgress.begin(app.name, progressId || crypto.randomUUID(), { versionId: String(ver.id), version: ver.version });
     let step = 'package';
     progress.report(step, 'running');
