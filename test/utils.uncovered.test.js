@@ -34,6 +34,25 @@ describe('uncovered utils', function () {
       progress.begin('demo', 'p-2', { versionId: '10', version: '1.2.4' }).report('env', 'error', { message: 'bad env' });
       expect(progress.active('demo')).to.equal(null);
     });
+
+    it('should persist status and logs in order and mark failure', async () => {
+      const { createDeployProgress } = require('../libs/utils/deployProgress');
+      const saved = [];
+      const progress = createDeployProgress({ persist: async state => saved.push(state), logMaxLines: 3, flushDelayMs: 5 });
+      const handle = progress.begin('demo', 'p-3', { versionId: '11', version: '2.0.0' });
+      handle.report('package', 'running');
+      handle.log('added 1 package\nnpm ERR! gyp failed\n');
+      handle.report('package', 'error', { message: 'npm install failed' });
+      await handle.flush();
+      const last = saved[saved.length - 1];
+      expect(saved[0]).to.include({ progressId: 'p-3', status: 'running', source: 'deploy' });
+      expect(last).to.include({ status: 'failed', step: 'package', message: 'npm install failed' });
+      expect(last.finishedAt).to.be.a('string');
+      expect(last.logs).to.have.length(3);
+      expect(last.logs[2]).to.match(/\[package\] error: npm install failed$/);
+      expect(progress.logsOf('demo', 'p-3')).to.deep.equal(last.logs);
+      expect(handle.finished()).to.equal(true);
+    });
   });
 
   describe('mergePm2Config', () => {

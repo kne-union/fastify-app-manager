@@ -108,6 +108,7 @@ deploy(versionId)
 | 版本上传 | Zip Slip 防护、条目数/体积上限、解压丢弃任意层级 `node_modules`、Fullstack 包格式校验、server 生产依赖安装 |
 | 短部署 | `deploy` / `start` / `restart` 立即返回 `deploying`，后台按 PM2 真实状态 + healthCheck 写回 `running`/`error`/`stopped` |
 | 部署进度 | `deploy` 按「准备部署包 → 校验环境变量 → SQL 迁移 → 启动进程 → 等待就绪」上报阶段，经 `GET .../app/deploy/stream` SSE 推送（含下载 / 解压 / 安装依赖等子阶段） |
+| 部署记录 | 每次部署（含父应用启动时补回部署目录）落库：状态 `running`/`success`/`failed`、阶段事件、部署日志（依赖安装输出、就绪失败时进程 `err.log` 末尾）；父应用重启后未结束的标为中断；`GET .../app/deploy/list`、`.../app/deploy/detail` 查询 |
 | 生命周期 | `start` / `stop` / `restart` / `remove`；父应用重启后异步 `syncAllStatuses` 对齐 PM2 |
 | 双通道访问 | 自定义域名透明反代 + `/app/{name}` 剥前缀反代 |
 | 日志 | PM2 落盘 + 历史分页（`beforeLine` 上滚、每页最多 100 行）+ SSE（含回放行与心跳） |

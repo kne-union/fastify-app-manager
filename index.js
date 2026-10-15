@@ -23,6 +23,12 @@ module.exports = fp(
         maxZipSize: 200 * 1024 * 1024,
         maxZipEntries: 20000,
         npmInstallTimeoutMs: 10 * 60 * 1000,
+        /** 每个应用保留的部署记录条数 */
+        deployRecordKeep: 20,
+        /** 单次部署日志最多保留的行数（超出丢弃最早的） */
+        deployLogMaxLines: 2000,
+        /** 就绪失败时附加到部署日志的进程错误日志行数 */
+        deployErrorLogTailLines: 50,
         logRetentionMaxRows: 10000,
         sseReplayLines: 100,
         sseHeartbeatMs: 15000,

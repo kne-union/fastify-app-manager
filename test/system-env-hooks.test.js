@@ -294,7 +294,9 @@ describe('system env hooks', function () {
 
     release();
     const { restored } = await recovering;
-    expect(restored).to.deep.equal([{ name: 'slow', version: '1.0.0', action: 'restored' }]);
+    expect(restored).to.have.length(1);
+    expect(restored[0]).to.include({ name: 'slow', version: '1.0.0', action: 'restored' });
+    expect(restored[0].progressId).to.be.a('string');
     expect(mockPm2.__store.has('app-manager__slow')).to.equal(true);
   });
 

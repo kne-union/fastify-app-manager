@@ -265,7 +265,7 @@ module.exports = fp(async (fastify, options) => {
 
   const detail = async ({ name }) => {
     const app = await getByName(name);
-    return Object.assign(toPublicApp(app), { deployment: deployProgress.active(app.name) });
+    return Object.assign(toPublicApp(app), { deployment: deployProgress.active(app.name), lastDeployment: await lastDeployment(app.name) });
   };
 
   const versionSqlDir = ver => path.join(ver.artifactPath, 'server', ver.migrationPath || options.sqlPath || 'sql');
@@ -486,7 +486,150 @@ module.exports = fp(async (fastify, options) => {
 
   /** 同一 app 并发同步合并为一次，避免 restart/reconcile 竞态 */
   const statusSyncInflight = new Map();
-  const deployProgress = createDeployProgress();
+
+  const pruneDeployRecords = async appName => {
+    const stale = await models.appDeploy.findAll({
+      where: { appName },
+      attributes: ['id'],
+      order: [['createdAt', 'DESC']],
+      offset: options.deployRecordKeep
+    });
+    if (stale.length) {
+      await models.appDeploy.destroy({ where: { id: stale.map(row => row.id) } });
+    }
+  };
+
+  const persistDeploy = async state => {
+    const values = {
+      appName: state.name,
+      progressId: state.progressId,
+      versionId: state.versionId,
+      version: state.version,
+      source: state.source,
+      status: state.status,
+      step: state.step,
+      message: state.message,
+      events: state.events,
+      log: state.logs.join('\n'),
+      startedAt: state.startedAt,
+      finishedAt: state.finishedAt
+    };
+    const record = await models.appDeploy.findOne({ where: { progressId: state.progressId } });
+    if (record) {
+      await record.update(values);
+      return;
+    }
+    await models.appDeploy.create(values);
+    await pruneDeployRecords(state.name);
+  };
+
+  const deployProgress = createDeployProgress({
+    persist: persistDeploy,
+    logMaxLines: options.deployLogMaxLines,
+    onPersistError: (err, state) => fastify.log.warn({ err, app: state.name, progressId: state.progressId }, 'persist deploy record failed')
+  });
+
+  const tailLines = (lines, n) => (n > 0 && lines.length > n ? lines.slice(-n) : lines);
+
+  /** 部署记录：进程内仍在跟踪的以内存为准（日志更新），否则读库 */
+  const toDeployRecord = (row, { withLog = false, logLines = 0 } = {}) => {
+    const memory = deployProgress.snapshot(row.appName);
+    const live = memory && memory.progressId === row.progressId ? memory : null;
+    const base = live || {
+      name: row.appName,
+      progressId: row.progressId,
+      versionId: row.versionId,
+      version: row.version,
+      source: row.source,
+      status: row.status,
+      step: row.step,
+      message: row.message,
+      startedAt: row.startedAt ? new Date(row.startedAt).toISOString() : null,
+      finishedAt: row.finishedAt ? new Date(row.finishedAt).toISOString() : null,
+      events: Array.isArray(row.events) ? row.events : []
+    };
+    const record = Object.assign({}, base, { name: row.appName });
+    if (!withLog) {
+      delete record.events;
+      return record;
+    }
+    const lines = live ? deployProgress.logsOf(row.appName, row.progressId) || [] : row.log ? row.log.split('\n') : [];
+    return Object.assign(record, { logTotalLines: lines.length, log: tailLines(lines, logLines).join('\n') });
+  };
+
+  const deployList = async ({ name, perPage = 20, currentPage = 1 } = {}) => {
+    const app = await getByName(name);
+    const { rows, count } = await models.appDeploy.findAndCountAll({
+      where: { appName: app.name },
+      attributes: { exclude: ['log', 'events'] },
+      offset: perPage * (currentPage - 1),
+      limit: perPage,
+      order: [['createdAt', 'DESC']]
+    });
+    return { pageData: rows.map(row => toDeployRecord(row)), totalCount: count };
+  };
+
+  /** progressId 为空取最近一次；logLines 为 0 返回全部已保存日志 */
+  const deployDetail = async ({ name, progressId, logLines = 0 } = {}) => {
+    const app = await getByName(name);
+    const where = { appName: app.name };
+    if (progressId) {
+      where.progressId = progressId;
+    }
+    let row = await models.appDeploy.findOne({ where, order: [['createdAt', 'DESC']] });
+    const memory = deployProgress.snapshot(app.name);
+    // 刚开始的部署可能还没落库
+    if (memory && (progressId ? memory.progressId === progressId : !row || row.progressId !== memory.progressId)) {
+      row = { appName: app.name, progressId: memory.progressId };
+    }
+    if (!row) {
+      httpError(404, 'deploy record not found');
+    }
+    return toDeployRecord(row, { withLog: true, logLines: Number(logLines) || 0 });
+  };
+
+  const lastDeployment = async name => {
+    const row = await models.appDeploy.findOne({ where: { appName: name }, attributes: { exclude: ['log', 'events'] }, order: [['createdAt', 'DESC']] });
+    return row ? toDeployRecord(row) : null;
+  };
+
+  /** 父进程重启后，内存里的部署进度已丢失：库里仍 running 的记录无法再结束，标记为中断 */
+  const markInterruptedDeploys = async () => {
+    const rows = await models.appDeploy.findAll({ where: { status: 'running' } });
+    for (const row of rows) {
+      if (deployProgress.active(row.appName)?.progressId === row.progressId) {
+        continue;
+      }
+      const at = new Date();
+      const message = 'deploy interrupted: app manager restarted';
+      await row.update({
+        status: 'failed',
+        message,
+        finishedAt: at,
+        events: (Array.isArray(row.events) ? row.events : []).concat({ progressId: row.progressId, step: row.step || 'package', status: 'error', detail: null, message, at: at.toISOString() }),
+        log: [row.log, `${at.toISOString()} ${message}`].filter(Boolean).join('\n')
+      });
+    }
+    return rows.length;
+  };
+
+  /** 就绪阶段收尾：失败时把进程错误日志末尾写进部署日志，便于定位启动失败 */
+  const settleDeployReady = async (app, progress, result) => {
+    if (result?.status === 'running') {
+      progress.report('ready', 'done');
+      return;
+    }
+    try {
+      const lines = await readLastLines(currentLogFile(app, 'err'), options.deployErrorLogTailLines, { timezone: options.logTimezone });
+      if (lines.length) {
+        progress.log(`---- ${app.name} err.log (last ${lines.length} lines) ----`);
+        lines.forEach(item => progress.log(item.content));
+      }
+    } catch (e) {
+      progress.log(`read err.log failed: ${e.message}`);
+    }
+    progress.report('ready', 'error', { message: result?.message || result?.status || null });
+  };
 
   /**
    * 根据 PM2 真实进程状态 + HTTP 健康检查，异步写回 DB status。
@@ -840,7 +983,7 @@ module.exports = fp(async (fastify, options) => {
   const canResolveFile = ver => !!ver.fileId && typeof options.resolveVersionFile === 'function';
 
   /** 版本目录不在磁盘时按 fileId 取回 zip 解压并装依赖；再以数据库中的 SQL 覆盖目录内 .sql */
-  const materializeArtifact = async (app, ver, { onProgress } = {}) => {
+  const materializeArtifact = async (app, ver, { onProgress, onLog } = {}) => {
     if (await hasArtifact(ver)) {
       onProgress && onProgress('reuse');
     } else {
@@ -860,7 +1003,8 @@ module.exports = fp(async (fastify, options) => {
           sqlPath: options.sqlPath,
           // 老版本可能没有 env.schema.json：照常还原目录，由启动前的环境变量校验给出提示
           requireEnvSchema: false,
-          onProgress
+          onProgress,
+          onLog
         });
         await fs.move(stagingPath, ver.artifactPath, { overwrite: true });
       } catch (e) {
@@ -901,20 +1045,27 @@ module.exports = fp(async (fastify, options) => {
     return results;
   };
 
-  /** 补回当前版本目录并恢复 current 链接；不跑 SQL 迁移 */
-  const restoreArtifact = async ({ app, ver }) => {
+  /** 补回当前版本目录并恢复 current 链接；不跑 SQL 迁移。progress 存在时记录到部署记录 */
+  const restoreArtifact = async ({ app, ver, progress }) => {
     if (!canResolveFile(ver)) {
       fastify.log.warn({ app: app.name, version: ver.version }, 'current version artifact missing and cannot be restored without fileId');
+      progress && progress.report('package', 'error', { message: 'current version artifact missing and cannot be restored without fileId' });
       return { name: app.name, version: ver.version, action: 'skipped', reason: 'no fileId' };
     }
     try {
-      await materializeArtifact(app, ver);
+      progress && progress.report('package', 'running');
+      await materializeArtifact(app, ver, {
+        onProgress: progress ? detail => progress.report('package', 'running', { detail }) : undefined,
+        onLog: progress ? progress.log : undefined
+      });
       await linkCurrent(app, ver.artifactPath);
+      progress && progress.report('package', 'done');
       fastify.log.info({ app: app.name, version: ver.version }, 'current version artifact restored from file');
-      return { name: app.name, version: ver.version, action: 'restored' };
+      return Object.assign({ name: app.name, version: ver.version, action: 'restored' }, progress ? { progressId: progress.progressId } : {});
     } catch (e) {
       fastify.log.warn({ err: e, app: app.name, version: ver.version }, 'restore current version artifact failed');
-      return { name: app.name, version: ver.version, action: 'failed', reason: e.message };
+      progress && progress.report('package', 'error', { message: e.message });
+      return Object.assign({ name: app.name, version: ver.version, action: 'failed', reason: e.message }, progress ? { progressId: progress.progressId } : {});
     }
   };
 
@@ -942,7 +1093,7 @@ module.exports = fp(async (fastify, options) => {
     let step = 'package';
     progress.report(step, 'running');
     try {
-      await materializeArtifact(app, ver, { onProgress: detail => progress.report('package', 'running', { detail }) });
+      await materializeArtifact(app, ver, { onProgress: detail => progress.report('package', 'running', { detail }), onLog: progress.log });
     } catch (e) {
       progress.report(step, 'error', { message: e.message });
       httpError(400, e.message);
@@ -962,15 +1113,15 @@ module.exports = fp(async (fastify, options) => {
     }
     progress.report(step, 'done');
 
-    await app.update({
-      status: 'deploying',
-      currentVersionId: String(ver.id),
-      message: null
-    });
-
-    await linkCurrent(app, ver.artifactPath);
-
     try {
+      await app.update({
+        status: 'deploying',
+        currentVersionId: String(ver.id),
+        message: null
+      });
+
+      await linkCurrent(app, ver.artifactPath);
+
       step = 'migrate';
       if (runMigration && options.migrateBeforeStart && ver.hasMigration) {
         progress.report(step, 'running');
@@ -1027,7 +1178,13 @@ module.exports = fp(async (fastify, options) => {
       progress.report(step, 'running');
       scheduleStatusSync(app.id, {
         beforeTables: beforeForReady,
-        onSettled: result => (result?.status === 'running' ? progress.report('ready', 'done') : progress.report('ready', 'error', { message: result?.message || result?.status || null }))
+        onSettled: result =>
+          settleDeployReady(app, progress, result).catch(err => {
+            fastify.log.warn({ err, app: app.name }, 'settle deploy ready failed');
+            if (!progress.finished()) {
+              progress.report('ready', 'error', { message: err.message });
+            }
+          })
       });
       await pruneVersionArtifacts(app).catch(err => fastify.log.warn({ err, app: app.name }, 'prune version artifacts failed'));
       return {
@@ -1300,6 +1457,11 @@ module.exports = fp(async (fastify, options) => {
       getLoadStore,
       getDeployProgress: () => deployProgress,
       waitDeployProgress: ({ name, progressId, timeoutMs }) => deployProgress.wait(name, progressId, { timeoutMs }),
+      deployList,
+      deployDetail,
+      lastDeployment,
+      markInterruptedDeploys,
+      settleDeployReady,
       getEnvDeclaration,
       listInjectedEnvKeys,
       toPublicApp,

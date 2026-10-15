@@ -4,7 +4,7 @@ const { spawn } = require('node:child_process');
 const { extractZipSafe, resolvePackageRoot } = require('./zip');
 const { validatePackageRoot, listSqlFiles } = require('./validatePackage');
 
-const runNpmInstall = (cwd, timeoutMs) =>
+const runNpmInstall = (cwd, timeoutMs, onLog) =>
   new Promise((resolve, reject) => {
     const child = spawn('npm', ['install', '--production', '--no-fund', '--no-audit'], {
       cwd,
@@ -12,8 +12,12 @@ const runNpmInstall = (cwd, timeoutMs) =>
       stdio: ['ignore', 'pipe', 'pipe']
     });
     let stderr = '';
+    child.stdout?.on('data', chunk => {
+      onLog && onLog(chunk.toString());
+    });
     child.stderr.on('data', chunk => {
       stderr += chunk.toString();
+      onLog && onLog(chunk.toString());
     });
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
@@ -34,7 +38,7 @@ const runNpmInstall = (cwd, timeoutMs) =>
   });
 
 /** install=false 时只解压校验，不装依赖（用于不常驻磁盘的版本上传） */
-const prepareVersionArtifact = async ({ zipBuffer, artifactPath, maxZipSize, maxZipEntries, npmInstallTimeoutMs, sqlPath, install = true, requireEnvSchema = true, onProgress }) => {
+const prepareVersionArtifact = async ({ zipBuffer, artifactPath, maxZipSize, maxZipEntries, npmInstallTimeoutMs, sqlPath, install = true, requireEnvSchema = true, onProgress, onLog }) => {
   await fs.emptyDir(artifactPath);
   onProgress && onProgress('extract');
   const extractDir = path.join(artifactPath, '_extract');
@@ -64,7 +68,7 @@ const prepareVersionArtifact = async ({ zipBuffer, artifactPath, maxZipSize, max
   const serverDir = path.join(artifactPath, 'server');
   if (install) {
     onProgress && onProgress('install');
-    await runNpmInstall(serverDir, npmInstallTimeoutMs);
+    await runNpmInstall(serverDir, npmInstallTimeoutMs, onLog);
   }
 
   const sqlDir = path.join(serverDir, sqlPath || 'sql');

@@ -1142,7 +1142,7 @@ describe('plugin integration', function () {
     });
 
     const snapshot = JSON.parse(events.match(/event: snapshot\ndata: (.+)\n/)[1]);
-    expect(snapshot).to.deep.equal({ steps: ['package', 'env', 'migrate', 'start', 'ready'], events: [] });
+    expect(snapshot).to.deep.equal({ steps: ['package', 'env', 'migrate', 'start', 'ready'], events: [], deploy: null });
     const progress = [...events.matchAll(/event: progress\ndata: (.+)\n/g)].map(m => JSON.parse(m[1]));
     expect(progress.every(item => item.progressId === progressId)).to.equal(true);
     expect(progress.map(item => [item.step, item.status, item.detail])).to.deep.equal([
@@ -1164,8 +1164,31 @@ describe('plugin integration', function () {
     const replay = fastify.appManager.services.app.getDeployProgress().snapshot('prog');
     expect(replay.events).to.have.length(10);
     expect(replay).to.include({ versionId: String(version.id), version: '1.0.0' });
+    let record;
+    for (let i = 0; i < 50; i++) {
+      record = (await fastify.inject({ method: 'GET', url: `/api/v1/app-manager/app/deploy/detail?name=prog&progressId=${progressId}` })).json();
+      if (record.status === 'success') break;
+      await new Promise(r => setTimeout(r, 20));
+    }
+    expect(record).to.include({ progressId, status: 'success', step: 'ready', versionId: String(version.id), source: 'deploy' });
+    expect(record.events).to.have.length(10);
+    expect(record.log).to.include('[ready] done');
     const detail = await fastify.inject({ method: 'GET', url: '/api/v1/app-manager/app/detail?name=prog' });
     expect(detail.json().deployment).to.equal(null);
+    expect(detail.json().lastDeployment).to.include({ progressId, status: 'success' });
+    const list = (await fastify.inject({ method: 'GET', url: '/api/v1/app-manager/app/deploy/list?name=prog' })).json();
+    expect(list.totalCount).to.equal(1);
+    expect(list.pageData[0]).to.not.have.property('log');
+  });
+
+  it('should mark deploys left running by a previous process as failed', async () => {
+    await fastify.inject({ method: 'POST', url: '/api/v1/app-manager/app/create', payload: { name: 'stale', label: 'Stale' } });
+    await fastify.appManager.models.appDeploy.create({ appName: 'stale', progressId: 'old-1', versionId: '1', version: '1.0.0', status: 'running', step: 'package', events: [], log: 'npm install ...' });
+    expect(await fastify.appManager.services.app.markInterruptedDeploys()).to.equal(1);
+    const record = (await fastify.inject({ method: 'GET', url: '/api/v1/app-manager/app/deploy/detail?name=stale' })).json();
+    expect(record).to.include({ progressId: 'old-1', status: 'failed', message: 'deploy interrupted: app manager restarted' });
+    expect(record.log).to.match(/^npm install \.\.\.\n.+deploy interrupted/);
+    expect(record.events[0]).to.include({ step: 'package', status: 'error' });
   });
 
   it('should reject packages without env.schema.json', async () => {

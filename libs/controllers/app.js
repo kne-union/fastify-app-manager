@@ -277,23 +277,75 @@ module.exports = fp(async (fastify, options) => {
     async (request, reply) => {
       const { name, progressId } = request.query;
       await services.app.detail({ name });
-      const sse = createSseReply(reply, { heartbeatMs: options.sseHeartbeatMs });
       const progress = services.app.getDeployProgress();
       const matches = event => !progressId || event.progressId === progressId;
-      const snapshot = progress.snapshot(name);
+      const memory = progress.snapshot(name);
+      let record = null;
+      if (progressId && (!memory || memory.progressId !== progressId)) {
+        // 不在本进程内（已结束被新部署覆盖或主进程重启过）：从部署记录回放
+        record = await services.app.deployDetail({ name, progressId, logLines: options.sseReplayLines }).catch(() => null);
+      } else if (memory) {
+        record = await services.app.deployDetail({ name, progressId: memory.progressId, logLines: options.sseReplayLines }).catch(() => null);
+      }
+      const sse = createSseReply(reply, { heartbeatMs: options.sseHeartbeatMs });
       sse.writeEvent('snapshot', {
         steps: DEPLOY_STEPS,
-        events: snapshot ? snapshot.events.filter(matches) : []
+        events: record ? (record.events || []).filter(matches) : memory ? memory.events.filter(matches) : [],
+        deploy: record ? Object.assign({}, record, { events: undefined }) : null
       });
 
       const onProgress = event => matches(event) && sse.writeEvent('progress', event);
+      const onLog = event => matches(event) && sse.writeEvent('log', event);
       const eventName = `deploy:${name}`;
+      const logEventName = `deploy-log:${name}`;
       progress.emitter.on(eventName, onProgress);
+      progress.emitter.on(logEventName, onLog);
       request.raw.on('close', () => {
         progress.emitter.off(eventName, onProgress);
+        progress.emitter.off(logEventName, onLog);
         sse.close();
       });
     }
+  );
+
+  fastify.get(
+    `${options.prefix}/app/deploy/list`,
+    {
+      onRequest: auth(),
+      schema: {
+        summary: '部署记录列表（不含日志）',
+        query: {
+          type: 'object',
+          required: ['name'],
+          properties: {
+            name: { type: 'string' },
+            perPage: { type: 'number', default: 20 },
+            currentPage: { type: 'number', default: 1 }
+          }
+        }
+      }
+    },
+    async request => services.app.deployList(request.query)
+  );
+
+  fastify.get(
+    `${options.prefix}/app/deploy/detail`,
+    {
+      onRequest: auth(),
+      schema: {
+        summary: '部署记录详情（含阶段事件与部署日志）；progressId 为空取最近一次',
+        query: {
+          type: 'object',
+          required: ['name'],
+          properties: {
+            name: { type: 'string' },
+            progressId: { type: 'string' },
+            logLines: { type: 'number', default: 0, description: '只返回最后 N 行日志；0 返回全部' }
+          }
+        }
+      }
+    },
+    async request => services.app.deployDetail(request.query)
   );
 
   fastify.get(
