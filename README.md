@@ -263,7 +263,7 @@ await fastify.listen({ port: 3000 });
 |--------|------|------|--------|------|
 | name | string | 是 | - | slug：`^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$` |
 | label | string | 是 | - | 展示名 |
-| domain | string | 否 | - | 绑定 Host（唯一）；冲突返回 409 |
+| domain | string / null | 否 | - | 绑定 Host（唯一）；冲突返回 409；空值存为 `null` |
 | icon | string | 否 | - | 图标 |
 | description | string | 否 | - | 描述 |
 | category | object / string | 否 | - | 应用分类（应用中心分组用），写入 `options.category`；推荐传 fastify-group 分组对象，对象只保留 `{ code, name }`，字符串原样保存 |
@@ -282,7 +282,7 @@ await fastify.listen({ port: 3000 });
 | 参数名 | 类型 | 必填 | 说明 |
 |--------|------|------|------|
 | name | string | 是 | 应用 slug |
-| label / domain / icon / description / env / pm2Config / options | - | 否 | 传入的字段才更新；`env` 按 patch 语义合并 |
+| label / domain / icon / description / env / pm2Config / options | - | 否 | 传入的字段才更新；`env` 按 patch 语义合并；`domain` 传 `null` / `''` 解绑域名（存为 `null`） |
 | category | object / string / null | 否 | 合并写入 `options.category`（对象只保留 `{ code, name }`），不影响 `options` 其它键；传空值清除分类 |
 | isPublic | boolean | 否 | 合并写入 `options.isPublic`，不影响 `options` 其它键 |
 | entries | array / null | 否 | 整体替换 `options.entries`（规则同创建），不影响 `options` 其它键；传 `[]` / `null` 清空入口 |

@@ -23,7 +23,7 @@ module.exports = fp(async (fastify, options) => {
           properties: {
             name: { type: 'string' },
             label: { type: 'string' },
-            domain: { type: 'string' },
+            domain: { type: ['string', 'null'] },
             icon: { type: 'string' },
             description: { type: 'string' },
             category: { type: ['object', 'string', 'null'] },
@@ -54,7 +54,7 @@ module.exports = fp(async (fastify, options) => {
           properties: {
             name: { type: 'string' },
             label: { type: 'string' },
-            domain: { type: 'string' },
+            domain: { type: ['string', 'null'] },
             icon: { type: 'string' },
             description: { type: 'string' },
             category: { type: ['object', 'string', 'null'] },
