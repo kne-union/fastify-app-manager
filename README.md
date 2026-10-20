@@ -198,6 +198,7 @@ await fastify.listen({ port: 3000 });
 | `portMax` | number | 否 | `7999` | 端口池上限（含） |
 | `pathPrefix` | string | 否 | `'/app'` | 路径访问前缀（无尾斜杠亦可） |
 | `passthroughEnvKeys` | array | 否 | `[]` | 允许注入子进程的宿主 env 键名 |
+| `pwaIconPrefix` | string | 否 | `'/api/v1/static/file-id'` | PWA manifest 图标地址前缀（应用 `icon` 为文件 id 时拼接） |
 | `secretEnvKeyPattern` | RegExp | 否 | `/(SECRET\|PASSWORD\|TOKEN\|KEY\|PRIVATE)/i` | 按键名正则脱敏；与显式 `secretEnvKeys` 取并集 |
 | `systemEnvKeys` | array | 否 | `[]` | 宿主维护的系统变量键名，与内置 `DB_TABLE_PREFIX` 合并：接口不返回，create / save / saveEnv 不可新增、修改或删除 |
 | `resolveSystemEnv` | function | 否 | `null` | `async ({ app, version, serverDir }) => env \| null`，每次启动进程（deploy / start / restart / 恢复）前调用；返回值覆盖应用变量注入子进程，值为 `null` / `undefined` 的键忽略，属于 `systemEnvKeys` 的键持久化到 `app.env` |
@@ -566,6 +567,15 @@ data: {"progressId":"p-1","step":"ready","status":"done","detail":null,"message"
 
 公开应用中心列表，**无需登录**。返回结构同 `app/center/list`，仅包含运行中且 `isPublic` 不为 `false` 的应用。
 
+##### GET `{prefix}/app/center/webmanifest`
+
+公开应用的 PWA manifest，**无需登录**，`Content-Type: application/manifest+json`。由 `@kne/pwa-document` 的 `buildWebManifest` 生成。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `name` | string | 是 | 应用名；不在公开列表中时 404 |
+| `path` | string | 否 | 应用入口路径（主入口或 `entries[].path`）；不匹配时回落到第一个入口 |
+
 ##### GET `{prefix}/app/detail`
 
 | 参数名 | 类型 | 必填 | 说明 |
@@ -777,6 +787,8 @@ data: {"name":"demo","ts":1791456608533,...}
 | `resolveAppLogFile({ name, file })` | 校验并返回 `{ path, fileName, size, compressed }`（下载用） |
 | `resolveAppLogFiles({ name, files })` | 批量校验（去重），返回 `{ name, files: [{ path, fileName, size, mtime, compressed }] }`（打包下载用） |
 | `removeLogFiles({ name, files })` | 删除归档，返回 `{ removed }` |
+| `pwaManifest({ name, path? })` | 同 `GET .../app/center/webmanifest` |
+| `resolvePwaEntry(urlPath, { shellEntries?, defaultIcon? })` | 按访问路径在公开应用中匹配 PWA 入口（`@kne/pwa-document` 的 `resolveEntry`），未命中时回落 `shellEntries`；宿主用于在 HTML 中注入 manifest |
 | `load({ name })` | 返回 `{ intervalMs, current, pageData }` |
 | `getLoadStore()` | 负载环形缓冲：`history(name)` / `latest(name)` / `emitter`（事件 `load:{name}`） |
 | `findByHost(host, { running? })` | 网关：按 domain 查找；默认只查 `running`，`running: false` 时不限状态 |
