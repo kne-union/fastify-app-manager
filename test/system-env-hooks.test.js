@@ -286,13 +286,21 @@ describe('system env hooks', function () {
       await fastify.inject({ method: 'POST', url: '/api/v1/app-manager/app/version/upload', payload: { name: 'slow', version: '1.0.0', fileId: 'file-slow' } })
     ).json();
     await fastify.inject({ method: 'POST', url: '/api/v1/app-manager/app/deploy', payload: { name: 'slow', versionId: String(slowVersion.id) } });
+    await fastify.inject({ method: 'POST', url: '/api/v1/app-manager/app/create', payload: { name: 'queued', label: 'queued' } });
+    hostFiles.set('file-queued', zipBuffer);
+    const queuedVersion = (
+      await fastify.inject({ method: 'POST', url: '/api/v1/app-manager/app/version/upload', payload: { name: 'queued', version: '1.0.0', fileId: 'file-queued' } })
+    ).json();
+    await fastify.inject({ method: 'POST', url: '/api/v1/app-manager/app/deploy', payload: { name: 'queued', versionId: String(queuedVersion.id) } });
     await services.app.syncStatus({ name: 'healthy' });
     await services.app.syncStatus({ name: 'slow' });
+    await services.app.syncStatus({ name: 'queued' });
 
-    // 模拟父应用重启：进程都不在、DB 仍是 running，slow 的部署目录丢失且取回文件很慢
+    // 模拟父应用重启：进程都不在、DB 仍是 running，slow 的部署目录丢失且取回文件很慢，queued 排在其后
     mockPm2.__store.clear();
-    await models.app.update({ status: 'running' }, { where: { name: ['healthy', 'slow'] } });
+    await models.app.update({ status: 'running' }, { where: { name: ['healthy', 'slow', 'queued'] } });
     await fs.remove(slowVersion.artifactPath);
+    await fs.remove(queuedVersion.artifactPath);
     let release;
     hostFiles.set('file-slow', new Promise(resolve => (release = resolve)).then(() => zipBuffer));
 
@@ -302,13 +310,21 @@ describe('system env hooks', function () {
     }
     expect(mockPm2.__store.has('app-manager__healthy')).to.equal(true);
     expect(mockPm2.__store.has('app-manager__slow')).to.equal(false);
+    expect(services.app.getDeployProgress().active('slow')).to.include({ source: 'restore', version: '1.0.0' });
+    expect(services.app.getDeployProgress().active('queued')).to.include({ source: 'restore', version: '1.0.0', step: null });
+    expect((await services.app.detail({ name: 'queued' })).deployment).to.include({ source: 'restore' });
+    expect((await services.app.centerList()).pageData.find(item => item.name === 'queued').deployment).to.deep.equal({ source: 'restore' });
 
     release();
     const { restored } = await recovering;
-    expect(restored).to.have.length(1);
+    expect(services.app.getDeployProgress().active('slow')).to.equal(null);
+    expect(services.app.getDeployProgress().active('queued')).to.equal(null);
+    expect(restored).to.have.length(2);
     expect(restored[0]).to.include({ name: 'slow', version: '1.0.0', action: 'restored' });
     expect(restored[0].progressId).to.be.a('string');
+    expect(restored[1]).to.include({ name: 'queued', version: '1.0.0', action: 'restored' });
     expect(mockPm2.__store.has('app-manager__slow')).to.equal(true);
+    expect(mockPm2.__store.has('app-manager__queued')).to.equal(true);
   });
 
   it('should reject a deploy while another deploy of the same app is running', async () => {

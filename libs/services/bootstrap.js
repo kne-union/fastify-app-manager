@@ -132,14 +132,26 @@ module.exports = fp(async (fastify, options) => {
     return [];
   };
 
-  /** 逐个补回缺失的部署目录（npm install 耗时），每补完一个就单独对齐状态并按需拉起 */
+  /** 逐个补回缺失的部署目录（npm install 耗时），每补完一个就单独对齐状态并按需拉起；排队中的应用也先登记进度，列表/详情据此显示恢复中 */
   const restoreArtifacts = async missing => {
     const { services } = fastify[options.name];
+    const queue = missing.map(item => ({
+      item,
+      progress: services.app.getDeployProgress().begin(item.app.name, crypto.randomUUID(), { versionId: String(item.ver.id), version: item.ver.version, source: 'restore' })
+    }));
     const results = [];
-    for (const item of missing) {
-      const { app, ver } = item;
-      const progress = services.app.getDeployProgress().begin(app.name, crypto.randomUUID(), { versionId: String(ver.id), version: ver.version, source: 'restore' });
-      const result = await services.app.restoreArtifact(Object.assign({}, item, { progress }));
+    for (const { item, progress } of queue) {
+      const { app } = item;
+      let result;
+      try {
+        result = await services.app.restoreArtifact(Object.assign({}, item, { progress }));
+      } catch (e) {
+        fastify.log.warn({ err: e, app: app.name }, 'restore artifact failed');
+        if (!progress.finished()) {
+          progress.report('package', 'error', { message: e.message });
+        }
+        continue;
+      }
       results.push(result);
       const wasActive = app.status === 'running' || app.status === 'deploying';
       try {

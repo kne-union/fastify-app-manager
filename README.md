@@ -501,7 +501,7 @@ data: {"progressId":"p-1","step":"ready","status":"done","detail":null,"message"
 
 ##### 部署记录
 
-每次部署（含父应用启动时补回部署目录，`source: 'restore'`）都会落库，每个应用保留最近 `deployRecordKeep` 条。父应用重启时，未结束的记录标为 `failed`（`message: deploy interrupted: app manager restarted`）。应用详情返回 `deployment`（进行中的部署，无则 `null`）与 `lastDeployment`（最近一次部署记录摘要）。
+每次部署（含父应用启动时补回部署目录，`source: 'restore'`；需补回的应用启动时即全部登记，排队中的也带 `deployment`）都会落库，每个应用保留最近 `deployRecordKeep` 条。父应用重启时，未结束的记录标为 `failed`（`message: deploy interrupted: app manager restarted`）。应用详情返回 `deployment`（进行中的部署，无则 `null`）与 `lastDeployment`（最近一次部署记录摘要）。
 
 | 方法 | 路径 | 参数 | 说明 |
 |------|------|------|------|
@@ -561,12 +561,15 @@ data: {"progressId":"p-1","step":"ready","status":"done","detail":null,"message"
       "entries": [
         { "label": "PC", "path": "/", "url": "/app/demo/" },
         { "label": "移动端", "path": "/mobile", "url": "/app/demo/mobile" }
-      ]
+      ],
+      "deployment": null
     }
   ],
   "totalCount": 1
 }
 ```
+
+`deployment`：部署或启动补回部署目录进行中时为 `{ source: 'deploy' | 'restore' }`，此时应用暂不可访问；否则为 `null`。
 
 ##### GET `{prefix}/app/center/public-list`
 
@@ -587,7 +590,7 @@ data: {"progressId":"p-1","step":"ready","status":"done","detail":null,"message"
 |--------|------|------|------|
 | name | string | 是 | 应用 slug |
 
-返回脱敏后的应用对象，另带 `deployment`：最近一次部署尚未结束（未出错、就绪阶段未完成）时为 `{ progressId, versionId, version, startedAt, step, detail }`，否则为 `null`。准备部署包阶段应用仍是旧的 `status` 与 `currentVersionId`，用它判断哪个版本正在部署。`app/list` 的每个元素同样带该字段。
+返回脱敏后的应用对象，另带 `deployment`：最近一次部署尚未结束（未出错、就绪阶段未完成）时为 `{ progressId, versionId, version, source, startedAt, step, detail }`（`source`：`deploy` 手动部署 / `restore` 启动补回，补回排队中 `step` 为 `null`），否则为 `null`。准备部署包阶段应用仍是旧的 `status` 与 `currentVersionId`，用它判断哪个版本正在部署。`app/list` 的每个元素同样带该字段。
 
 详情另带 `pm2Defaults`：宿主生效的全局 PM2 默认（即插件选项 `pm2Defaults`），供管理端展示应用 `pm2Config` 未覆盖项的实际取值。
 
