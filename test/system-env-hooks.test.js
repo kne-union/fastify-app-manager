@@ -81,9 +81,9 @@ describe('system env hooks', function () {
       createAuthenticate: () => [],
       migrateBeforeStart: false,
       systemEnvKeys: ['HOOK_CLIENT_ID', 'HOOK_SECRET'],
-      resolveSystemEnv: async ({ app, version, serverDir }) => {
+      resolveSystemEnv: async ({ app, version, serverDir, upstreamUrl }) => {
         const pkg = await fs.readJson(path.join(serverDir, 'package.json'));
-        resolveCalls.push({ name: app.name, versionId: String(version.id), deps: Object.keys(pkg.dependencies || {}) });
+        resolveCalls.push({ name: app.name, versionId: String(version.id), deps: Object.keys(pkg.dependencies || {}), upstreamUrl, port: app.port });
         return {
           HOOK_CLIENT_ID: app.env?.HOOK_CLIENT_ID || `client-${app.name}`,
           HOOK_SECRET: 'secret-value',
@@ -171,7 +171,10 @@ describe('system env hooks', function () {
   it('should inject resolved env, persist system keys and keep them hidden and locked', async () => {
     const version = await createAndDeploy('hooked');
 
-    expect(resolveCalls).to.deep.equal([{ name: 'hooked', versionId: String(version.id), deps: ['demo-dep'] }]);
+    expect(resolveCalls).to.have.length(1);
+    const { upstreamUrl, port, ...call } = resolveCalls[0];
+    expect(call).to.deep.equal({ name: 'hooked', versionId: String(version.id), deps: ['demo-dep'] });
+    expect(upstreamUrl).to.equal(`http://127.0.0.1:${port}`);
     const pm2Env = mockPm2.__store.get('app-manager__hooked').pm2_env.env;
     expect(pm2Env.HOOK_CLIENT_ID).to.equal('client-hooked');
     expect(pm2Env.HOOK_SECRET).to.equal('secret-value');

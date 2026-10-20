@@ -137,7 +137,8 @@ module.exports = fp(async (fastify, options) => {
     const port = await portPool.allocate({
       models,
       portMin: options.portMin,
-      portMax: options.portMax
+      portMax: options.portMax,
+      host: options.upstreamHost
     });
 
     const normalizedOptions = Object.assign({}, appOptions || {});
@@ -489,7 +490,7 @@ module.exports = fp(async (fastify, options) => {
 
   const healthCheck = async (port, { timeoutMs, intervalMs, healthPath }) => {
     const started = Date.now();
-    const url = `http://127.0.0.1:${port}${healthPath || '/'}`;
+    const url = `http://${options.upstreamHost}:${port}${healthPath || '/'}`;
     while (Date.now() - started < timeoutMs) {
       try {
         const res = await fetch(url, { method: 'GET' });
@@ -808,7 +809,7 @@ module.exports = fp(async (fastify, options) => {
     }
 
     if (typeof options.resolveSystemEnv === 'function') {
-      const systemEnv = await options.resolveSystemEnv({ app, version, serverDir });
+      const systemEnv = await options.resolveSystemEnv({ app, version, serverDir, upstreamUrl: `http://${options.upstreamHost}:${app.port}` });
       const injectedKeys = [];
       if (systemEnv && typeof systemEnv === 'object') {
         const persisted = {};
