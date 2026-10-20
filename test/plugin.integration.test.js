@@ -279,7 +279,8 @@ describe('plugin integration', function () {
       entries: [
         { label: 'PC', path: '/', url: '/app/demo/' },
         { label: '移动端', path: '/mobile', url: '/app/demo/mobile' }
-      ]
+      ],
+      deployment: null
     });
     expect(center.json().pageData.find(i => i.name === 'demo-social').entries).to.deep.equal([]);
 

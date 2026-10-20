@@ -256,16 +256,20 @@ module.exports = fp(async (fastify, options) => {
     const rows = await models.app.findAll({ where: { status: 'running' }, order: [['createdAt', 'DESC']] });
     const pageData = rows
       .filter(app => !publicOnly || isAppPublic(app))
-      .map(app => ({
-        name: app.name,
-        label: app.label,
-        icon: app.icon,
-        description: app.description,
-        category: app.options?.category || null,
-        isPublic: isAppPublic(app),
-        pathUrl: `${mountPrefix(app.name)}/`,
-        entries: resolveEntries(app)
-      }));
+      .map(app => {
+        const active = deployProgress.active(app.name);
+        return {
+          name: app.name,
+          label: app.label,
+          icon: app.icon,
+          description: app.description,
+          category: app.options?.category || null,
+          isPublic: isAppPublic(app),
+          pathUrl: `${mountPrefix(app.name)}/`,
+          entries: resolveEntries(app),
+          deployment: active ? { source: active.source } : null
+        };
+      });
     return { pageData, totalCount: pageData.length };
   };
 
