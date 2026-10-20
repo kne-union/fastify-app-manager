@@ -401,6 +401,8 @@ data: {"progressId":"p-1","step":"ready","status":"done","detail":null,"message"
 
 返回脱敏后的应用对象，另带 `deployment`：最近一次部署尚未结束（未出错、就绪阶段未完成）时为 `{ progressId, versionId, version, startedAt, step, detail }`，否则为 `null`。准备部署包阶段应用仍是旧的 `status` 与 `currentVersionId`，用它判断哪个版本正在部署。`app/list` 的每个元素同样带该字段。
 
+详情另带 `pm2Defaults`：宿主生效的全局 PM2 默认（即插件选项 `pm2Defaults`），供管理端展示应用 `pm2Config` 未覆盖项的实际取值。
+
 #### POST `{prefix}/app/start` | `stop` | `restart` | `remove`
 
 | 参数名 | 类型 | 必填 | 说明 |

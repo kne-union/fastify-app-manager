@@ -296,7 +296,11 @@ module.exports = fp(async (fastify, options) => {
 
   const detail = async ({ name }) => {
     const app = await getByName(name);
-    return Object.assign(toPublicApp(app), { deployment: deployProgress.active(app.name), lastDeployment: await lastDeployment(app.name) });
+    return Object.assign(toPublicApp(app), {
+      pm2Defaults: options.pm2Defaults || {},
+      deployment: deployProgress.active(app.name),
+      lastDeployment: await lastDeployment(app.name)
+    });
   };
 
   const versionSqlDir = ver => path.join(ver.artifactPath, 'server', ver.migrationPath || options.sqlPath || 'sql');
