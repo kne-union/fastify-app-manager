@@ -201,18 +201,19 @@ await fastify.listen({ port: 3000 });
 | `pwaIconPrefix` | string | 否 | `'/api/v1/static/file-id'` | PWA manifest 图标地址前缀（应用 `icon` 为文件 id 时拼接） |
 | `secretEnvKeyPattern` | RegExp | 否 | `/(SECRET\|PASSWORD\|TOKEN\|KEY\|PRIVATE)/i` | 按键名正则脱敏；与显式 `secretEnvKeys` 取并集 |
 | `systemEnvKeys` | array | 否 | `[]` | 宿主维护的系统变量键名，与内置 `DB_TABLE_PREFIX` 合并：接口不返回，create / save / saveEnv 不可新增、修改或删除 |
-| `resolveSystemEnv` | function | 否 | `null` | `async ({ app, version, serverDir }) => env \| null`，每次启动进程（deploy / start / restart / 恢复）前调用；返回值覆盖应用变量注入子进程，值为 `null` / `undefined` 的键忽略，属于 `systemEnvKeys` 的键持久化到 `app.env` |
+| `resolveSystemEnv` | function | 否 | `null` | `async ({ app, version, serverDir, upstreamUrl }) => env \| null`（`upstreamUrl` 为子应用进程地址 `http://{upstreamHost}:{port}`），每次启动进程（deploy / start / restart / 恢复）前调用；返回值覆盖应用变量注入子进程，值为 `null` / `undefined` 的键忽略，属于 `systemEnvKeys` 的键持久化到 `app.env` |
 | `onAppRemoved` | function | 否 | `null` | `async ({ app }) => void`，应用删除成功后调用，`app` 为删除前快照（含 `env`）；数据清理未完成而未删除时不调用，钩子报错只记 warn 日志 |
 | `resolveVersionFile` | function | 否 | `null` | `async ({ fileId, name, version, request }) => Buffer`，版本上传传 `fileId`（而非 multipart 文件）时调用，返回 zip 内容；未配置时传 `fileId` 返回 400。版本记录保存 `fileId`；这类版本只在当前部署时常驻磁盘，部署非当前版本或启动时当前版本目录缺失会再次调用以重建 |
 | `defaultAppDb` | object | 否 | `appsRoot/_shared/apps-data.sqlite` | 托管应用默认库（须与宿主主库分离） |
 | `dbQueryMaxRows` | number | 否 | `500` | 只读 query SQL 最大返回行数 |
 | `pm2Defaults` | object | 否 | 见下表 | 全局 PM2 默认；可被应用 `pm2Config` 覆盖 |
-| `createAuthenticate` | function | 否 | 见说明 | 返回 `onRequest` 钩子数组；默认尝试 admin |
+| `createAuthenticate` | function | 否 | 见说明 | 返回 `onRequest` 钩子数组；默认 `fastify.account.authenticate.user` + `admin` |
 | `createUserAuthenticate` | function | 否 | 见说明 | 应用中心等普通用户接口的 `onRequest` 钩子数组；默认尝试 `fastify.account.authenticate.user` |
+| `upstreamHost` | string | 否 | `'127.0.0.1'` | 子应用进程监听地址：网关转发、WebSocket、就绪探测、端口探测与 `resolveSystemEnv` 的 `upstreamUrl` 共用 |
 | `healthCheckPath` | string | 否 | `'/'` | 部署后就绪探测路径 |
 | `healthCheckTimeoutMs` | number | 否 | `30000` | 探测总超时（毫秒） |
 | `healthCheckIntervalMs` | number | 否 | `1000` | 探测轮询间隔（毫秒） |
-| `maxZipSize` | number | 否 | `209715200` | zip 最大字节（200MB）；同步 multipart 限制 |
+| `maxZipSize` | number | 否 | `209715200` | zip 最大字节（200MB）；上传接口按此值读取 multipart，不受宿主已注册 multipart 的限制影响 |
 | `maxZipEntries` | number | 否 | `20000` | zip 最大条目数（不含被丢弃的 `node_modules` 条目） |
 | `npmInstallTimeoutMs` | number | 否 | `600000` | `server` 目录 `npm install` 超时 |
 | `deployRecordKeep` | number | 否 | `20` | 每个应用保留的部署记录条数 |
@@ -248,7 +249,11 @@ await fastify.listen({ port: 3000 });
 
 应用级 `pm2Config` 仅允许覆盖：`exec_mode`、`instances`、`autorestart`、`max_memory_restart`、`max_restarts`、`min_uptime`、`kill_timeout`、`merge_logs`。
 
-> **关键设计**：`createAuthenticate` 默认实现在存在 `fastify.account.authenticate.admin` 时返回该钩子，否则返回空数组（便于本地无 account 插件时调试）。生产环境应显式传入鉴权。
+> **关键设计**：`createAuthenticate` 默认实现在存在 `fastify.account.authenticate.admin` 时返回 `[user, admin]`（admin 依赖 user 先写入 `request.userInfo`），否则返回空数组（便于本地无 account 插件时调试）。生产环境应显式传入鉴权。
+>
+> **query token**：`createAuthenticate` / `createUserAuthenticate` 返回非空数组时，会在最前面自动加一个钩子：请求没有 `Authorization` 头而 query 带 `token` 时，转成 `Bearer {token}`（日志 SSE、原生导航下载无法带请求头）。宿主无需自行处理。
+>
+> **重复注册**：宿主已注册 `@fastify/multipart` 或 `@fastify/reply-from` 时（如 `@kne/fastify-file-manager` 会注册 multipart），本插件不再重复注册。
 
 > **依赖**：插件 `dependencies: ['fastify-sequelize']`，须先 `register('@kne/fastify-sequelize')` 再注册本插件，并在业务侧调用 `fastify.sequelize.sync()`。
 
@@ -965,3 +970,34 @@ pickHostEnv(passthroughEnvKeys) → app.env → PORT=分配端口（强制） �
 ```
 
 API 响应脱敏：`secretEnvKeyPattern` ∪ `options.secretEnvKeys`；明文密钥不回传，顶层 `secretEnvKeys` 只暴露键名。
+
+#### 应用 OIDC 对接（可选）
+
+宿主已注册 `@kne/fastify-oidc` 作为主 IdP、希望子应用统一登录时使用；不传则子应用不注入任何登录相关变量，按各自的登录运行（`@kne/fastify-oidc` 未设置 `AUTH_MODE` 时默认 `standalone`）。`@kne/fastify-oidc` 为可选 peer 依赖，不用 OIDC 的宿主无需安装。
+
+```js
+const createAppOidc = require('@kne/fastify-app-manager/oidc');
+
+const appOidc = createAppOidc(fastify, { origin, issuer, serviceAudience });
+fastify.register(require('@kne/fastify-app-manager'), {
+  systemEnvKeys: appOidc.systemEnvKeys,
+  resolveSystemEnv: appOidc.resolveSystemEnv,
+  onAppRemoved: appOidc.onAppRemoved
+});
+```
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| origin | string | 是 | - | 宿主对外地址，拼子应用回调地址与 audience |
+| issuer | string | 是 | - | 宿主 IdP issuer |
+| serviceAudience | string | 是 | - | 子应用服务 client 可访问的宿主资源标识 |
+| pathPrefix | string | 否 | `'/app'` | 与 app-manager 的 `pathPrefix` 一致 |
+| backchannelLogoutPath | string | 否 | `'/api/oidc/backchannel-logout'` | 子应用登出通知路径，拼在 `upstreamUrl` 之后，直连子应用进程 |
+
+返回 `{ systemEnvKeys, resolveSystemEnv, onAppRemoved, getOpenApiToken, issueUserAccessToken }`。
+
+| 子应用情况 | 行为 |
+|------|------|
+| `server/package.json` 未依赖 `@kne/fastify-oidc` | 不登记、不注入 |
+| `server/env.schema.json` 声明 `AUTH_MODE` 默认值为 `standalone` | 不登记、不注入，保持自己的登录；之前以 central 启动过的应用注入 `AUTH_MODE=standalone` 覆盖 |
+| 其它依赖 `@kne/fastify-oidc` 的应用 | 登记资源服务、前端 client、服务 client，注入 `AUTH_MODE=central` 与 `OIDC_*` |

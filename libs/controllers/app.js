@@ -167,7 +167,7 @@ module.exports = fp(async (fastify, options) => {
       let { name, version, label, fileId } = request.isMultipart() ? {} : request.body || {};
       let zipBuffer;
       if (request.isMultipart()) {
-        for await (const part of request.parts()) {
+        for await (const part of request.parts({ limits: { fileSize: options.maxZipSize } })) {
           if (part.type === 'file') {
             zipBuffer = await part.toBuffer();
           } else {

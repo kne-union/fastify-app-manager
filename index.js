@@ -15,6 +15,8 @@ module.exports = fp(
         prefix: '/api/v1/app-manager',
         appsRoot,
         portMin: 4000,
+        /** 子应用进程监听地址：网关转发、WebSocket、就绪探测、端口探测与 resolveSystemEnv 的 upstreamUrl 共用 */
+        upstreamHost: '127.0.0.1',
         portMax: 7999,
         pathPrefix: '/app',
         healthCheckPath: '/',
@@ -74,9 +76,10 @@ module.exports = fp(
           kill_timeout: 5000,
           merge_logs: true
         },
+        // admin 依赖 user 先写入 request.userInfo，不可只挂 authenticate.admin
         createAuthenticate: () => {
           if (fastify.account?.authenticate?.admin) {
-            return [fastify.account.authenticate.admin];
+            return [fastify.account.authenticate.user, fastify.account.authenticate.admin];
           }
           return [];
         },
@@ -109,13 +112,31 @@ module.exports = fp(
       await fs.ensureDir(path.dirname(options.defaultAppDb.storage));
     }
 
-    await fastify.register(require('@fastify/multipart'), {
-      limits: {
-        fileSize: options.maxZipSize
+    // 日志 SSE、原生导航下载无法带请求头，token 放在 query 中
+    const queryTokenToAuthorization = async request => {
+      if (!request.headers.authorization && typeof request.query?.token === 'string' && request.query.token) {
+        request.headers.authorization = `Bearer ${request.query.token}`;
       }
-    });
+    };
+    const withQueryToken = createAuthenticate => () => {
+      const list = createAuthenticate() || [];
+      return list.length ? [queryTokenToAuthorization, ...list] : list;
+    };
+    options.createAuthenticate = withQueryToken(options.createAuthenticate);
+    options.createUserAuthenticate = withQueryToken(options.createUserAuthenticate);
 
-    await fastify.register(require('@fastify/reply-from'));
+    // 宿主可能已注册（如 fastify-file-manager），重复注册会报错
+    if (!fastify.hasDecorator('multipartErrors')) {
+      await fastify.register(require('@fastify/multipart'), {
+        limits: {
+          fileSize: options.maxZipSize
+        }
+      });
+    }
+
+    if (!fastify.hasReplyDecorator('from')) {
+      await fastify.register(require('@fastify/reply-from'));
+    }
 
     fastify.register(require('@kne/fastify-namespace'), {
       options,

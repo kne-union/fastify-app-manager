@@ -24,7 +24,7 @@ module.exports = fp(async (fastify, options) => {
     const rawUrl = request.raw.url || '/';
     const targetPath = stripPrefix ? stripMountPrefix(rawUrl, app.name) : rawUrl;
 
-    const dest = `http://127.0.0.1:${app.port}${targetPath}`;
+    const dest = `http://${options.upstreamHost}:${app.port}${targetPath}`;
     const mountPrefix = `${pathPrefix}/${app.name}`;
 
     const tracker = fastify[ns].requestMetrics?.begin(app.name);
@@ -196,7 +196,7 @@ module.exports = fp(async (fastify, options) => {
     }
 
     req.url = targetPath;
-    wsProxy.ws(req, socket, head, { target: `http://127.0.0.1:${app.port}` }, error => {
+    wsProxy.ws(req, socket, head, { target: `http://${options.upstreamHost}:${app.port}` }, error => {
       fastify.log.warn({ err: error, app: app.name }, 'websocket upgrade proxy failed');
       rejectUpgrade(socket, 502);
     });
