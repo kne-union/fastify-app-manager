@@ -558,6 +558,35 @@ event: load
 data: {"name":"demo","ts":1791456608533,...}
 ```
 
+### 宿主前端托管 `@kne/fastify-app-manager/host-document`
+
+独立插件，托管宿主自身的前端产物并接管前端路由：静态文件直出；未命中的 GET / HEAD 返回入口 HTML，按访问路径匹配到应用中心公开应用或 `shellEntries` 时注入 PWA manifest / 图标 / 标题；`manifestFiles` 以 `application/manifest+json` 返回。应用中心未注册时只做前端路由兜底与 `shellEntries` 注入。
+
+须注册在**根作用域**（不要带 `prefix`），否则接管不到 `/admin` 等前端路由；宿主内不要再注册根路径的 `@fastify/static` 或 `setNotFoundHandler`。
+
+```js
+fastify.register(require('@kne/fastify-app-manager/host-document'), {
+  root: path.join(__dirname, './build'),
+  entry: () => (fastify.config.ENV === 'prod' ? 'entry-prod.html' : 'index.html'),
+  shellEntries: [
+    { path: '/apps', manifest: '/manifest-apps.json', icon: '/pwa/apps-apple-touch-icon.png', title: '应用中心' },
+    { path: '/', manifest: '/manifest.json', icon: '/pwa/home-apple-touch-icon.png', title: '开发者文档' }
+  ],
+  defaultIcon: '/pwa/apps-apple-touch-icon.png'
+});
+```
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| `root` | string | 是 | - | 前端产物目录 |
+| `entry` | string \| () => string | 否 | `'index.html'` | 入口 HTML 文件名，注册时求值 |
+| `shellEntries` | array | 否 | `[]` | 宿主自身页面的 PWA 入口（`path`、`manifest`、`icon`、`title`） |
+| `defaultIcon` | string | 否 | - | 应用无图标时使用的图标 |
+| `appManagerName` | string | 否 | `'appManager'` | 应用中心命名空间，存在时用其 `services.app.resolvePwaEntry` 匹配公开应用 |
+| `manifestPrefix` | string | 否 | `'/api/v1/app-manager'` | 应用中心未注册时传给 `resolveEntry` 的 manifest 前缀 |
+| `staticPrefix` | string | 否 | `'/api/v1/static/file-id'` | 应用中心未注册时传给 `resolveEntry` 的图标前缀 |
+| `manifestFiles` | string[] | 否 | `['manifest.json', 'manifest-apps.json']` | 以 `application/manifest+json` 返回的根目录文件 |
+
 ### 程序化 API
 
 命名空间：`fastify[options.name]`（默认 `fastify.appManager`）。
