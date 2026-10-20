@@ -27,6 +27,7 @@ const { toIsoInTz, convertLogText } = require('../utils/logTime');
 const { runSqlMigrations, MIGRATION_ACTIONS } = require('../utils/migrate');
 const { readSqlDir, writeSqlDir } = require('../utils/versionSql');
 const { createDeployProgress } = require('../utils/deployProgress');
+const pwaDocument = require('@kne/pwa-document');
 const pm2Util = require('../utils/pm2');
 
 const NAME_RE = /^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$/;
@@ -265,6 +266,31 @@ module.exports = fp(async (fastify, options) => {
         entries: resolveEntries(app)
       }));
     return { pageData, totalCount: pageData.length };
+  };
+
+  const pwaOptions = () => ({ manifestPrefix: options.prefix, staticPrefix: options.pwaIconPrefix });
+
+  /** 公开应用的 webmanifest；path 为应用入口地址，不传或不匹配时用应用根路径 */
+  const pwaManifest = async ({ name, path: surfacePath } = {}) => {
+    const { pageData } = await centerList({ publicOnly: true });
+    const app = pageData.find(item => item.name === name);
+    if (!app) {
+      httpError(404, `app ${name} not found`);
+    }
+    const surfaces = pwaDocument.appSurfaces(app);
+    const wanted = pwaDocument.normalizePath(surfacePath || app.pathUrl);
+    const surface = surfaces.find(item => pwaDocument.normalizePath(item.path) === wanted) || surfaces[0];
+    return pwaDocument.buildWebManifest(app, {
+      path: surface.path,
+      title: surface.title,
+      icon: pwaDocument.iconUrlFor(app.icon, pwaOptions())
+    });
+  };
+
+  /** 按请求路径匹配公开应用入口，shellEntries 为宿主自身页面；无匹配返回 null */
+  const resolvePwaEntry = async (urlPath, { shellEntries = [], defaultIcon } = {}) => {
+    const { pageData } = await centerList({ publicOnly: true });
+    return pwaDocument.resolveEntry(urlPath, pageData, Object.assign(pwaOptions(), { shellEntries, defaultIcon }));
   };
 
   const detail = async ({ name }) => {
@@ -1439,6 +1465,8 @@ module.exports = fp(async (fastify, options) => {
       saveEnv,
       list,
       centerList,
+      pwaManifest,
+      resolvePwaEntry,
       detail,
       uploadVersion,
       listVersions,
