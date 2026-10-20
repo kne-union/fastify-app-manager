@@ -220,6 +220,8 @@ describe('plugin integration', function () {
     });
     expect(detail.json().name).to.equal('demo');
     expect(detail.json().secretEnvKeys).to.include('PLAIN_DB');
+    expect(detail.json().pm2Defaults).to.deep.equal(fastify.appManager.options.pm2Defaults);
+    expect(detail.json().pm2Defaults.max_memory_restart).to.equal('512M');
 
     const categorized = await fastify.inject({
       method: 'POST',
