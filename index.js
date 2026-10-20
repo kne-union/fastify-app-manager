@@ -51,6 +51,8 @@ module.exports = fp(
         /** async ({ fileId, name, version, request }) => Buffer，版本上传传 fileId 时读取宿主文件 */
         resolveVersionFile: null,
         secretEnvKeyPattern: /(SECRET|PASSWORD|TOKEN|KEY|PRIVATE)/i,
+        /** 应用图标为文件 id 时，PWA manifest 中图标地址的前缀 */
+        pwaIconPrefix: '/api/v1/static/file-id',
         sqlPath: 'sql',
         migrateBeforeStart: false,
         defaultAppDb: {

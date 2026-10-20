@@ -94,6 +94,28 @@ module.exports = fp(async (fastify, options) => {
     async () => services.app.centerList({ publicOnly: true })
   );
 
+  fastify.get(
+    `${options.prefix}/app/center/webmanifest`,
+    {
+      schema: {
+        summary: '应用中心：公开应用的 PWA manifest（无需登录）',
+        querystring: {
+          type: 'object',
+          required: ['name'],
+          properties: {
+            name: { type: 'string' },
+            path: { type: 'string' }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      const manifest = await services.app.pwaManifest({ name: request.query.name, path: request.query.path });
+      reply.type('application/manifest+json; charset=utf-8').send(manifest);
+      return reply;
+    }
+  );
+
   fastify.post(
     `${options.prefix}/app/save-env`,
     {

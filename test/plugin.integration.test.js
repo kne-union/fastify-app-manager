@@ -284,6 +284,18 @@ describe('plugin integration', function () {
     const publicCenter = await fastify.inject({ method: 'GET', url: '/api/v1/app-manager/app/center/public-list' });
     expect(publicCenter.json().pageData.map(i => i.name)).to.deep.equal(['demo']);
 
+    const manifest = await fastify.inject({ method: 'GET', url: '/api/v1/app-manager/app/center/webmanifest?name=demo&path=%2Fapp%2Fdemo%2Fmobile' });
+    expect(manifest.headers['content-type']).to.contain('application/manifest+json');
+    expect(manifest.json()).to.include({ id: '/app/demo/mobile', start_url: '/app/demo/mobile', scope: '/app/demo/', name: '移动端' });
+    const missingManifest = await fastify.inject({ method: 'GET', url: '/api/v1/app-manager/app/center/webmanifest?name=demo-social' });
+    expect(missingManifest.statusCode).to.equal(404);
+
+    const pwaEntry = await fastify.appManager.services.app.resolvePwaEntry('/app/demo/mobile/list', {
+      shellEntries: [{ path: '/', manifest: '/manifest.json', title: '首页' }]
+    });
+    expect(pwaEntry).to.include({ path: '/app/demo/mobile', title: '移动端', manifest: '/api/v1/app-manager/app/center/webmanifest?name=demo&path=%2Fapp%2Fdemo%2Fmobile' });
+    expect((await fastify.appManager.services.app.resolvePwaEntry('/blog', { shellEntries: [{ path: '/', title: '首页' }] })).title).to.equal('首页');
+
     const madePrivate = await fastify.inject({
       method: 'POST',
       url: '/api/v1/app-manager/app/save',
