@@ -15,6 +15,8 @@
 | `systemEnvKeys` | array | 否 | `[]` | 宿主维护的系统变量键名，与内置 `DB_TABLE_PREFIX` 合并：接口不返回，create / save / saveEnv 不可新增、修改或删除 |
 | `resolveSystemEnv` | function | 否 | `null` | `async ({ app, version, serverDir, upstreamUrl }) => env \| null`（`upstreamUrl` 为子应用进程地址 `http://{upstreamHost}:{port}`），每次启动进程（deploy / start / restart / 恢复）前调用；返回值覆盖应用变量注入子进程，值为 `null` / `undefined` 的键忽略，属于 `systemEnvKeys` 的键持久化到 `app.env` |
 | `onAppRemoved` | function | 否 | `null` | `async ({ app }) => void`，应用删除成功后调用，`app` 为删除前快照（含 `env`）；数据清理未完成而未删除时不调用，钩子报错只记 warn 日志 |
+| `getOpenApiToken` | function | 否 | `null` | `async app => accessToken`，签发读取子应用 `/open-api.json` 的服务令牌；未配置时 `GET .../app/open-api` 返回 400。接 OIDC 时传 `appOidc.getOpenApiToken` |
+| `issueUserAccessToken` | function | 否 | `null` | `async ({ app, userId, tenantId }) => accessToken`，以登录用户身份签发子应用令牌；未配置时 `POST .../app/open-api/token` 返回 400。接 OIDC 时传 `appOidc.issueUserAccessToken` |
 | `resolveVersionFile` | function | 否 | `null` | `async ({ fileId, name, version, request }) => Buffer`，版本上传传 `fileId`（而非 multipart 文件）时调用，返回 zip 内容；未配置时传 `fileId` 返回 400。版本记录保存 `fileId`；这类版本只在当前部署时常驻磁盘，部署非当前版本或启动时当前版本目录缺失会再次调用以重建 |
 | `defaultAppDb` | object | 否 | `appsRoot/_shared/apps-data.sqlite` | 托管应用默认库（须与宿主主库分离） |
 | `dbQueryMaxRows` | number | 否 | `500` | 只读 query SQL 最大返回行数 |
@@ -157,6 +159,67 @@
 - `others`：已配置但 schema 未声明的变量。
 - 两者都**不含应用中心注入的变量**（见 `services.app.listInjectedEnvKeys`）：`PORT`、`DB_TABLE_PREFIX`、`systemEnvKeys`、`passthroughEnvKeys`、托管库连接 `DB_DIALECT` / `DB_HOST` / `DB_PORT` / `DB_DATABASE` / `DB_USERNAME` / `DB_PASSWORD` / `DB_STORAGE` 与 `DB_DEDICATED`（自有库在数据页签配置），以及最近一次启动时 `resolveSystemEnv` 返回的键（记录在 `options.injectedEnvKeys`）。注入的变量照常参与启动前校验。
 - 版本没有 schema 时 `hasSchema=false`、`declared=[]`，该版本无法部署。
+
+#### GET `{prefix}/app/open-api`
+
+运行中应用的 OpenAPI 文档：用 `getOpenApiToken` 签发的服务令牌请求子应用 `http://{upstreamHost}:{port}/open-api.json`，原样返回 JSON。
+
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| name | string | 是 | 应用 slug |
+
+应用未运行、未配置 `getOpenApiToken`、子应用未开启 `/open-api.json`（需 `@kne/fastify-app-runtime` >=0.1.1）或拒绝服务令牌（需 >=0.1.2）时返回 400，其它上游错误返回 502。
+
+#### POST `{prefix}/app/open-api/token`
+
+以当前登录用户（`request.userInfo.id`）身份调用 `issueUserAccessToken` 签发访问该应用接口的令牌，供管理端在线调试：前端带 `Authorization: Bearer {token}` 经网关 `{pathPrefix}/{name}` 请求子应用，子应用看到的是该用户本人。
+
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| name | string | 是 | 应用 slug |
+| tenantId | string | 否 | 接口依赖租户时传入 |
+
+返回 `{ token, expiresAt }`，`expiresAt` 取自令牌 `exp`（非 JWT 时为 `null`）。应用未运行或未配置 `issueUserAccessToken` 时返回 400。
+
+#### GET `{prefix}/app/open-api/records`
+
+应用的接口调试记录或用例，按应用共享（不区分用户），不要求应用运行。
+
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| name | string | 是 | 应用 slug |
+| type | string | 是 | `history` 调用记录（按创建时间倒序）/ `case` 接口用例（按创建时间正序） |
+| operationKey | string | 否 | 只取该接口的记录（如按接口分页加载用例） |
+| keyword | string | 否 | 按方法、地址、标题、用例名模糊搜索，不区分大小写 |
+| offset | integer | 否 | 跳过条数，默认 0；下拉加载时传已加载条数，新增 / 删除记录后也不会重复或漏取 |
+| limit | integer | 否 | 每次条数（1–100），不传返回全部 |
+
+返回 `{ pageData, totalCount }`，`pageData` 为记录原文。
+
+#### GET `{prefix}/app/open-api/records/count`
+
+按接口统计记录数，参数 `name`、`type`，返回 `{ [operationKey]: count }`（如接口树上的用例数量）。
+
+#### POST `{prefix}/app/open-api/records/save`
+
+按 `records[].id` 新增或覆盖记录，保存人记为当前登录用户；调用记录超过 1000 条时删除最旧的。
+
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| name | string | 是 | 应用 slug |
+| type | string | 是 | `history` 调用记录 / `case` 接口用例 |
+| records | array | 是 | 记录原文，每条须带 `id`，原样保存（如 PostCat `OpenApiView` 的调用记录、用例） |
+
+#### POST `{prefix}/app/open-api/records/remove`
+
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| name | string | 是 | 应用 slug |
+| type | string | 是 | `history` / `case` |
+| ids | string[] | 否 | 要删除的记录 id |
+| all | boolean | 否 | 为 `true` 时清空该应用该类型的全部记录（忽略 `ids`） |
+
+删除应用时一并删除其调试记录与用例。
 
 #### 数据运维与表生命周期
 
@@ -621,6 +684,17 @@ data: {"name":"demo","ts":1791456608533,...}
 | `getLogHub()` | 获取 EventEmitter |
 | `toPublicApp(app)` / `mountPrefix(name)` | 序列化辅助 |
 
+#### services.openApi
+
+| 方法签名 | 说明 |
+|----------|------|
+| `getDocument({ name })` | 同 `GET .../app/open-api` |
+| `issueUserToken({ name, userId, tenantId? })` | 同 `POST .../app/open-api/token` |
+| `listRecords({ name, type, operationKey?, keyword?, offset?, limit? })` | 同 `GET .../app/open-api/records` |
+| `countRecords({ name, type })` | 同 `GET .../app/open-api/records/count` |
+| `saveRecords({ name, type, records, userId? })` | 同 `POST .../app/open-api/records/save` |
+| `removeRecords({ name, type, ids?, all? })` | 同 `POST .../app/open-api/records/remove` |
+
 #### services.dbops
 
 | 方法签名 | 说明 |
@@ -645,7 +719,7 @@ data: {"name":"demo","ts":1791456608533,...}
 | 方法签名 | 说明 |
 |----------|------|
 | `onReady()` | `ensureSchema` 后连接 PM2、挂 log bus、启动日志切分与负载采样定时器，并 **setImmediate** 异步执行 `recoverOnStartup`，以及一次 `rotateLogs` 与一次 `sampleLoad`（不阻塞父应用 ready） |
-| `ensureSchema()` | 宿主 `sync()` 不给已有表加列：为老库补齐后续新增的可空列（当前为 `appVersion.fileId`、`appVersion.migrationFiles`），可重复执行 |
+| `ensureSchema()` | 宿主 `sync()` 不给已有表加列：为老库补齐后续新增的可空列（当前为 `appVersion.fileId`、`appVersion.migrationFiles`、`appVersion.envSchema`、`appOpenApiRecord.searchText`），可重复执行 |
 | `recoverOnStartup()` | 两路并行：部署目录完好的应用立即 `reconcile`；目录缺失的应用逐个 `restoreArtifact`（需重装依赖，较慢），每补完一个即单独 `syncStatus` 并按需拉起；补不回且原为 `running`/`deploying` 的标记 `error`；两路结束后 `pruneAllVersionArtifacts`。返回 `{ reconciled, restored, pruned }` |
 | `onClose()` | 停止切分与采样定时器并等待进行中的任务，断开 bus / PM2（由插件 `onClose` 调用） |
 | `rotateLogs({ now? })` | 立即执行一轮切分 + 压缩 + 保留清理；返回本轮切分的 `[{ name, stream, fileName, reason }]`，`reason` 为 `size` / `daily` |
@@ -694,6 +768,23 @@ data: {"name":"demo","ts":1791456608533,...}
 | envSchema | json / null | `server/env.schema.json` 内容，接口不返回（列表只给 `hasEnvSchema`）；老版本为空时从版本目录回填 |
 
 唯一约束：`(app_name, version)`。
+
+#### appOpenApiRecord
+
+应用接口调试记录与用例，按应用共享；删除记录为硬删除。
+
+| 属性名 | 类型 | 说明 |
+|--------|------|------|
+| id | string | 雪花主键 |
+| appName | string | 所属应用 name |
+| type | string | `history` 调用记录 / `case` 接口用例 |
+| recordId | string | 前端生成的记录 id |
+| operationKey | string / null | 所属接口 key |
+| data | json | 记录原文 |
+| searchText | text / null | 搜索文本：小写的方法、地址、标题、用例名，保存时生成 |
+| userId | string / null | 最后保存人 |
+
+索引：`(app_name, type)`；唯一约束：`(app_name, type, record_id)`。
 
 ### 机制说明
 
@@ -799,7 +890,10 @@ const appOidc = createAppOidc(fastify, { origin, issuer, serviceAudience });
 fastify.register(require('@kne/fastify-app-manager'), {
   systemEnvKeys: appOidc.systemEnvKeys,
   resolveSystemEnv: appOidc.resolveSystemEnv,
-  onAppRemoved: appOidc.onAppRemoved
+  onAppRemoved: appOidc.onAppRemoved,
+  // 可选：开启 GET/POST {prefix}/app/open-api（接口文档与在线调试）
+  getOpenApiToken: appOidc.getOpenApiToken,
+  issueUserAccessToken: appOidc.issueUserAccessToken
 });
 ```
 

@@ -1339,6 +1339,7 @@ module.exports = fp(async (fastify, options) => {
 
     const snapshot = app.toJSON();
     await models.appVersion.destroy({ where: { appName: name } });
+    await models.appOpenApiRecord.destroy({ where: { appName: name }, force: true });
     await fs.remove(app.rootPath).catch(() => {});
     deployProgress.clear(app.name);
     await app.destroy();

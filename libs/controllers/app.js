@@ -155,6 +155,126 @@ module.exports = fp(async (fastify, options) => {
     async request => services.app.getEnvDeclaration(request.query)
   );
 
+  fastify.get(
+    `${options.prefix}/app/open-api`,
+    {
+      onRequest: auth(),
+      schema: {
+        summary: '运行中应用的 OpenAPI 文档（子应用 /open-api.json 原文，需配置 getOpenApiToken）',
+        query: {
+          type: 'object',
+          required: ['name'],
+          properties: {
+            name: { type: 'string' }
+          }
+        }
+      }
+    },
+    async request => services.openApi.getDocument(request.query)
+  );
+
+  fastify.post(
+    `${options.prefix}/app/open-api/token`,
+    {
+      onRequest: auth(),
+      schema: {
+        summary: '以当前登录用户身份签发访问应用接口的令牌，供在线调试（需配置 issueUserAccessToken）',
+        body: {
+          type: 'object',
+          required: ['name'],
+          properties: {
+            name: { type: 'string' },
+            tenantId: { type: 'string' }
+          }
+        }
+      }
+    },
+    async request => services.openApi.issueUserToken(Object.assign({}, request.body, { userId: request.userInfo?.id }))
+  );
+
+  fastify.get(
+    `${options.prefix}/app/open-api/records`,
+    {
+      onRequest: auth(),
+      schema: {
+        summary: '应用接口调试记录或用例（按应用共享；调用记录倒序、最多保留 1000 条；传 limit 时按 offset 分页）',
+        query: {
+          type: 'object',
+          required: ['name', 'type'],
+          properties: {
+            name: { type: 'string' },
+            type: { type: 'string', enum: ['history', 'case'] },
+            operationKey: { type: 'string', description: '只取该接口的记录' },
+            keyword: { type: 'string', description: '按方法、地址、标题、用例名模糊搜索（不区分大小写）' },
+            offset: { type: 'integer', minimum: 0, default: 0 },
+            limit: { type: 'integer', minimum: 1, maximum: 100 }
+          }
+        }
+      }
+    },
+    async request => services.openApi.listRecords(request.query)
+  );
+
+  fastify.get(
+    `${options.prefix}/app/open-api/records/count`,
+    {
+      onRequest: auth(),
+      schema: {
+        summary: '按接口统计应用接口调试记录 / 用例数量，返回 { [operationKey]: count }',
+        query: {
+          type: 'object',
+          required: ['name', 'type'],
+          properties: {
+            name: { type: 'string' },
+            type: { type: 'string', enum: ['history', 'case'] }
+          }
+        }
+      }
+    },
+    async request => services.openApi.countRecords(request.query)
+  );
+
+  fastify.post(
+    `${options.prefix}/app/open-api/records/save`,
+    {
+      onRequest: auth(),
+      schema: {
+        summary: '新增或覆盖应用接口调试记录 / 用例（按 records[].id 覆盖）',
+        body: {
+          type: 'object',
+          required: ['name', 'type', 'records'],
+          properties: {
+            name: { type: 'string' },
+            type: { type: 'string', enum: ['history', 'case'] },
+            records: { type: 'array', items: { type: 'object', required: ['id'], additionalProperties: true } }
+          }
+        }
+      }
+    },
+    async request => services.openApi.saveRecords(Object.assign({}, request.body, { userId: request.userInfo?.id }))
+  );
+
+  fastify.post(
+    `${options.prefix}/app/open-api/records/remove`,
+    {
+      onRequest: auth(),
+      schema: {
+        summary: '删除应用接口调试记录 / 用例（all=true 时清空该类型全部记录）',
+        body: {
+          type: 'object',
+          required: ['name', 'type'],
+          properties: {
+            name: { type: 'string' },
+            type: { type: 'string', enum: ['history', 'case'] },
+            ids: { type: 'array', items: { type: 'string' } },
+            all: { type: 'boolean' }
+          }
+        }
+      }
+    },
+    async request => services.openApi.removeRecords(request.body)
+  );
+
   fastify.post(
     `${options.prefix}/app/version/upload`,
     {

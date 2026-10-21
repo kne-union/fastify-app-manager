@@ -50,6 +50,10 @@ module.exports = fp(
         resolveSystemEnv: null,
         /** async ({ app }) => void，应用删除成功后调用，app 为删除前快照；报错只记日志 */
         onAppRemoved: null,
+        /** async app => accessToken，签发读取子应用 /open-api.json 的服务令牌；不传则 /app/open-api 不可用 */
+        getOpenApiToken: null,
+        /** async ({ app, userId, tenantId }) => accessToken，以登录用户身份签发子应用令牌；不传则 /app/open-api/token 不可用 */
+        issueUserAccessToken: null,
         /** async ({ fileId, name, version, request }) => Buffer，版本上传传 fileId 时读取宿主文件 */
         resolveVersionFile: null,
         secretEnvKeyPattern: /(SECRET|PASSWORD|TOKEN|KEY|PRIVATE)/i,
