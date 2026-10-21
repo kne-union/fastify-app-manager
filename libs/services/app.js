@@ -3,6 +3,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const fs = require('fs-extra');
 const portPool = require('../utils/portPool');
+const { createPm2Name } = require('../utils/hostName');
 const {
   mergeEnv,
   maskEnvForResponse,
@@ -167,7 +168,7 @@ module.exports = fp(async (fastify, options) => {
       port,
       status: 'idle',
       rootPath,
-      pm2Name: `app-manager__${name}`,
+      pm2Name: createPm2Name(options.hostName, name),
       message: null
     });
     return toPublicApp(app);

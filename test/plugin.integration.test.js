@@ -77,6 +77,7 @@ describe('plugin integration', function () {
     });
     await fastify.register(require('..'), {
       appsRoot,
+      hostName: 'test-host',
       portMin: 5100,
       portMax: 5199,
       healthCheckTimeoutMs: 200,
@@ -374,7 +375,7 @@ describe('plugin integration', function () {
     });
     expect(deployed.statusCode).to.equal(200);
     expect(deployed.json().status).to.equal('deploying');
-    expect(mockPm2.__store.has('app-manager__biz')).to.equal(true);
+    expect(mockPm2.__store.has('app-manager__test-host__biz')).to.equal(true);
 
     await new Promise(r => setTimeout(r, 300));
 
@@ -965,7 +966,7 @@ describe('plugin integration', function () {
     hub.on('log:sse', payload => received.push(payload));
 
     mockPm2.__bus.emit('log:out', {
-      process: { name: 'app-manager__sse' },
+      process: { name: 'app-manager__test-host__sse' },
       data: 'from-bus'
     });
     await new Promise(r => setTimeout(r, 50));

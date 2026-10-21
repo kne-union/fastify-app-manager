@@ -8,6 +8,7 @@ const { LOG_STREAMS, rotateIfNeeded, compressArchive, applyRetention } = require
 const { summarizeProcesses, createLoadStore } = require('../utils/loadMonitor');
 const { createRequestMetrics } = require('../utils/requestMetrics');
 const { toIsoInTz } = require('../utils/logTime');
+const { createPm2Name } = require('../utils/hostName');
 
 const OFFLINE_LOAD = { status: 'offline', cpu: 0, memory: 0, instances: 0, pids: [], uptime: 0, restarts: 0 };
 
@@ -181,8 +182,37 @@ module.exports = fp(async (fastify, options) => {
     return results;
   };
 
+  /**
+   * 进程名规则变化（如加上宿主名）后，把库里的旧名改成新名；随后的 reconcile 会按新名拉起应在运行的应用。
+   * 旧名进程只在其工作目录位于本应用目录下时才删除：共用 PM2 时同名旧进程可能属于其它宿主。
+   */
+  const migratePm2Names = async () => {
+    const { models } = fastify[options.name];
+    const apps = await models.app.findAll();
+    const migrated = [];
+    for (const app of apps) {
+      const pm2Name = createPm2Name(options.hostName, app.name);
+      if (app.pm2Name === pm2Name) {
+        continue;
+      }
+      try {
+        const rootPath = path.resolve(app.rootPath) + path.sep;
+        const owned = (await pm2Util.describe(app.pm2Name)).some(item => path.resolve(item.pm2_env?.pm_cwd || '').startsWith(rootPath));
+        if (owned) {
+          await pm2Util.deleteProcess(app.pm2Name);
+        }
+        await app.update({ pm2Name });
+        migrated.push({ name: app.name, from: app.pm2Name, to: pm2Name });
+      } catch (e) {
+        fastify.log.warn({ err: e, app: app.name }, 'migrate pm2 name failed');
+      }
+    }
+    return migrated;
+  };
+
   const recoverOnStartup = async () => {
     const { services } = fastify[options.name];
+    await migratePm2Names().catch(err => fastify.log.warn({ err }, 'migrate pm2 names failed'));
     await services.app.markInterruptedDeploys().catch(err => fastify.log.warn({ err }, 'mark interrupted deploys failed'));
     const missing = await services.app.listMissingArtifacts();
     // 两路并行：部署目录完好的应用不必等其它应用重装依赖
@@ -337,6 +367,6 @@ module.exports = fp(async (fastify, options) => {
   };
 
   Object.assign(fastify[options.name].services, {
-    bootstrap: { onReady, onClose, ensureSchema, recoverOnStartup, reconcile, rotateLogs, sampleLoad }
+    bootstrap: { onReady, onClose, ensureSchema, migratePm2Names, recoverOnStartup, reconcile, rotateLogs, sampleLoad }
   });
 });

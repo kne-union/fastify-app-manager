@@ -74,6 +74,7 @@ describe('system env hooks', function () {
     });
     await fastify.register(require('..'), {
       appsRoot,
+      hostName: 'test-host',
       portMin: 5300,
       portMax: 5399,
       healthCheckTimeoutMs: 200,
@@ -175,7 +176,7 @@ describe('system env hooks', function () {
     const { upstreamUrl, port, ...call } = resolveCalls[0];
     expect(call).to.deep.equal({ name: 'hooked', versionId: String(version.id), deps: ['demo-dep'] });
     expect(upstreamUrl).to.equal(`http://127.0.0.1:${port}`);
-    const pm2Env = mockPm2.__store.get('app-manager__hooked').pm2_env.env;
+    const pm2Env = mockPm2.__store.get('app-manager__test-host__hooked').pm2_env.env;
     expect(pm2Env.HOOK_CLIENT_ID).to.equal('client-hooked');
     expect(pm2Env.HOOK_SECRET).to.equal('secret-value');
     expect(pm2Env.HOOK_RUNTIME_ONLY).to.equal('runtime');
@@ -276,6 +277,34 @@ describe('system env hooks', function () {
     ]);
   });
 
+  it('should rename legacy pm2 processes on startup and leave same-named processes of other hosts alone', async () => {
+    const { services, models } = fastify.appManager;
+    await createAndDeploy('legacy');
+    await fastify.inject({ method: 'POST', url: '/api/v1/app-manager/app/create', payload: { name: 'shared', label: 'shared' } });
+    const legacy = await models.app.findOne({ where: { name: 'legacy' } });
+    mockPm2.__store.clear();
+    mockPm2.__store.set('app-manager__legacy', {
+      name: 'app-manager__legacy',
+      pm2_env: { status: 'online', pm_cwd: path.join(legacy.rootPath, 'current', 'server') }
+    });
+    mockPm2.__store.set('app-manager__shared', {
+      name: 'app-manager__shared',
+      pm2_env: { status: 'online', pm_cwd: '/other-host/managed-apps/shared/current/server' }
+    });
+    await models.app.update({ pm2Name: 'app-manager__legacy' }, { where: { name: 'legacy' } });
+    await models.app.update({ pm2Name: 'app-manager__shared' }, { where: { name: 'shared' } });
+
+    const migrated = await services.bootstrap.migratePm2Names();
+
+    expect(migrated.map(item => item.to).sort()).to.deep.equal(['app-manager__test-host__legacy', 'app-manager__test-host__shared']);
+    expect(mockPm2.__store.has('app-manager__legacy')).to.equal(false);
+    expect(mockPm2.__store.has('app-manager__shared')).to.equal(true);
+    expect((await models.app.findOne({ where: { name: 'shared' } })).pm2Name).to.equal('app-manager__test-host__shared');
+
+    await services.app.syncStatus({ name: 'legacy', recoverIfMissing: true });
+    expect(mockPm2.__store.has('app-manager__test-host__legacy')).to.equal(true);
+  });
+
   it('should recover healthy apps on startup without waiting for slow artifact restores', async () => {
     const { services, models } = fastify.appManager;
     await createAndDeploy('healthy');
@@ -305,11 +334,11 @@ describe('system env hooks', function () {
     hostFiles.set('file-slow', new Promise(resolve => (release = resolve)).then(() => zipBuffer));
 
     const recovering = services.bootstrap.recoverOnStartup();
-    for (let i = 0; i < 100 && !mockPm2.__store.has('app-manager__healthy'); i++) {
+    for (let i = 0; i < 100 && !mockPm2.__store.has('app-manager__test-host__healthy'); i++) {
       await new Promise(resolve => setTimeout(resolve, 20));
     }
-    expect(mockPm2.__store.has('app-manager__healthy')).to.equal(true);
-    expect(mockPm2.__store.has('app-manager__slow')).to.equal(false);
+    expect(mockPm2.__store.has('app-manager__test-host__healthy')).to.equal(true);
+    expect(mockPm2.__store.has('app-manager__test-host__slow')).to.equal(false);
     expect(services.app.getDeployProgress().active('slow')).to.include({ source: 'restore', version: '1.0.0' });
     expect(services.app.getDeployProgress().active('queued')).to.include({ source: 'restore', version: '1.0.0', step: null });
     expect((await services.app.detail({ name: 'queued' })).deployment).to.include({ source: 'restore' });
@@ -323,8 +352,8 @@ describe('system env hooks', function () {
     expect(restored[0]).to.include({ name: 'slow', version: '1.0.0', action: 'restored' });
     expect(restored[0].progressId).to.be.a('string');
     expect(restored[1]).to.include({ name: 'queued', version: '1.0.0', action: 'restored' });
-    expect(mockPm2.__store.has('app-manager__slow')).to.equal(true);
-    expect(mockPm2.__store.has('app-manager__queued')).to.equal(true);
+    expect(mockPm2.__store.has('app-manager__test-host__slow')).to.equal(true);
+    expect(mockPm2.__store.has('app-manager__test-host__queued')).to.equal(true);
   });
 
   it('should reject a deploy while another deploy of the same app is running', async () => {
