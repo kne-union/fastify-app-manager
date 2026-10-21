@@ -20,21 +20,12 @@ const readPackageName = dir => {
 };
 
 /**
- * 从 cwd 向上找到项目根（含 .git 的目录，找不到则到文件系统根）沿途最外层 package.json 的 name。
- * 宿主 server 目录的 package.json 常叫 server，区分不了宿主，所以取项目根。
+ * 取 cwd 的 package.json name；cwd 为 server 目录时优先取上一级（宿主 server/package.json 常叫 server，区分不了宿主）。
  */
 const resolveHostName = (cwd = process.cwd()) => {
-  let dir = path.resolve(cwd);
-  let name = null;
-  while (true) {
-    name = readPackageName(dir) || name;
-    const parent = path.dirname(dir);
-    if (fs.existsSync(path.join(dir, '.git')) || parent === dir) {
-      break;
-    }
-    dir = parent;
-  }
-  return normalizeHostName(name);
+  const dir = path.resolve(cwd);
+  const parentName = path.basename(dir) === 'server' ? readPackageName(path.dirname(dir)) : null;
+  return normalizeHostName(parentName || readPackageName(dir));
 };
 
 const createPm2Name = (hostName, name) => (hostName ? `${PM2_NAME_PREFIX}${hostName}__${name}` : `${PM2_NAME_PREFIX}${name}`);
