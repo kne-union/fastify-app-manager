@@ -39,14 +39,19 @@ module.exports = fp(async (fastify, options) => {
   /** 宿主 sync() 不会给已有表加列：老库升级时补齐后续新增的可空列 */
   const ensureSchema = async () => {
     const { models } = fastify[options.name];
-    const model = models.appVersion;
-    const queryInterface = model.sequelize.getQueryInterface();
-    const table = model.getTableName();
-    const columns = await queryInterface.describeTable(table);
-    for (const name of ['fileId', 'migrationFiles', 'envSchema']) {
-      const attr = model.rawAttributes[name];
-      if (!columns[attr.field]) {
-        await queryInterface.addColumn(table, attr.field, { type: attr.type, allowNull: true, comment: attr.comment });
+    const targets = [
+      [models.appVersion, ['fileId', 'migrationFiles', 'envSchema']],
+      [models.appOpenApiRecord, ['searchText']]
+    ];
+    for (const [model, names] of targets) {
+      const queryInterface = model.sequelize.getQueryInterface();
+      const table = model.getTableName();
+      const columns = await queryInterface.describeTable(table);
+      for (const name of names) {
+        const attr = model.rawAttributes[name];
+        if (!columns[attr.field]) {
+          await queryInterface.addColumn(table, attr.field, { type: attr.type, allowNull: true, comment: attr.comment });
+        }
       }
     }
   };
