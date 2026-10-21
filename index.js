@@ -3,6 +3,7 @@ const path = require('node:path');
 const fs = require('fs-extra');
 const { assertDefaultAppDbSeparated } = require('./libs/utils/dbIdentity');
 const { parseTimezone } = require('./libs/utils/logTime');
+const { normalizeHostName, resolveHostName } = require('./libs/utils/hostName');
 
 module.exports = fp(
   async (fastify, options) => {
@@ -102,6 +103,9 @@ module.exports = fp(
       },
       options
     );
+
+    // 多个宿主共用一个 PM2 守护进程时，进程名带宿主名才不会互相覆盖
+    options.hostName = options.hostName ? normalizeHostName(options.hostName) : resolveHostName();
 
     parseTimezone(options.logTimezone);
 

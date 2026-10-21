@@ -1,0 +1,42 @@
+const { expect } = require('chai');
+const path = require('node:path');
+const fs = require('fs-extra');
+const os = require('node:os');
+const { normalizeHostName, resolveHostName, createPm2Name } = require('../libs/utils/hostName');
+
+describe('hostName', () => {
+  let root;
+
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'fam-host-'));
+  });
+
+  afterEach(async () => {
+    await fs.remove(root);
+  });
+
+  it('should normalize scoped package names', () => {
+    expect(normalizeHostName('@kne/ai-talent-saas')).to.equal('kne-ai-talent-saas');
+    expect(normalizeHostName(' developer-document ')).to.equal('developer-document');
+    expect(normalizeHostName('')).to.equal('');
+  });
+
+  it('should take the outermost package.json up to the git root', async () => {
+    const project = path.join(root, 'project');
+    await fs.ensureDir(path.join(project, '.git'));
+    await fs.writeJson(path.join(root, 'package.json'), { name: 'outside' });
+    await fs.writeJson(path.join(project, 'package.json'), { name: '@kne/ai-talent-saas' });
+    await fs.outputJson(path.join(project, 'server', 'package.json'), { name: 'server' });
+    expect(resolveHostName(path.join(project, 'server'))).to.equal('kne-ai-talent-saas');
+  });
+
+  it('should fall back to the nearest package.json without a git root', async () => {
+    await fs.outputJson(path.join(root, 'app', 'package.json'), { name: 'server' });
+    expect(resolveHostName(path.join(root, 'app'))).to.equal('server');
+  });
+
+  it('should build pm2 names with and without host name', () => {
+    expect(createPm2Name('kne-ai-talent-saas', 'questionnaire')).to.equal('app-manager__kne-ai-talent-saas__questionnaire');
+    expect(createPm2Name('', 'questionnaire')).to.equal('app-manager__questionnaire');
+  });
+});
