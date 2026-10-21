@@ -87,6 +87,11 @@ module.exports = fp(
           }
           return [];
         },
+        /** 应用分类：插件内部注册 @kne/fastify-group，宿主已有分组服务时可关闭 */
+        enableGroup: true,
+        groupName: 'appManagerGroup',
+        /** 表名 = 前缀 + snakeCase(groupName + Tag)，默认 t_app_manager_group_tag */
+        groupDbTableNamePrefix: 't_',
         /** 普通登录用户可访问的接口（应用中心列表） */
         createUserAuthenticate: () => {
           if (fastify.account?.authenticate?.user) {
@@ -128,6 +133,16 @@ module.exports = fp(
     };
     options.createAuthenticate = withQueryToken(options.createAuthenticate);
     options.createUserAuthenticate = withQueryToken(options.createUserAuthenticate);
+
+    // 分类读取需对未登录的公开应用中心开放，增删改沿用管理端鉴权
+    if (options.enableGroup !== false) {
+      await fastify.register(require('@kne/fastify-group'), {
+        name: options.groupName,
+        prefix: `${options.prefix}/group`,
+        dbTableNamePrefix: options.groupDbTableNamePrefix,
+        getAuthenticate: type => (type === 'read' ? [] : options.createAuthenticate())
+      });
+    }
 
     // 宿主可能已注册（如 fastify-file-manager），重复注册会报错
     if (!fastify.hasDecorator('multipartErrors')) {

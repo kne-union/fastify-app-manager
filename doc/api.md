@@ -23,6 +23,9 @@
 | `pm2Defaults` | object | 否 | 见下表 | 全局 PM2 默认；可被应用 `pm2Config` 覆盖 |
 | `createAuthenticate` | function | 否 | 见说明 | 返回 `onRequest` 钩子数组；默认 `fastify.account.authenticate.user` + `admin` |
 | `createUserAuthenticate` | function | 否 | 见说明 | 应用中心等普通用户接口的 `onRequest` 钩子数组；默认尝试 `fastify.account.authenticate.user` |
+| `enableGroup` | boolean | 否 | `true` | 是否在插件内部注册 `@kne/fastify-group` 提供应用分类接口；宿主已有分组服务时可设为 `false` |
+| `groupName` | string | 否 | `'appManagerGroup'` | 内部分组插件的命名空间（`fastify[groupName]`），与宿主自己注册的 `group` 区分 |
+| `groupDbTableNamePrefix` | string | 否 | `'t_'` | 分组表前缀，表名为前缀 + `snakeCase(groupName + 'Tag')`，默认 `t_app_manager_group_tag` |
 | `upstreamHost` | string | 否 | `'127.0.0.1'` | 子应用进程监听地址：网关转发、WebSocket、就绪探测、端口探测与 `resolveSystemEnv` 的 `upstreamUrl` 共用 |
 | `healthCheckPath` | string | 否 | `'/'` | 部署后就绪探测路径 |
 | `healthCheckTimeoutMs` | number | 否 | `30000` | 探测总超时（毫秒） |
@@ -88,7 +91,7 @@
 | description | string | 否 | - | 描述 |
 | category | object / string | 否 | - | 应用分类（应用中心分组用），写入 `options.category`；推荐传 fastify-group 分组对象，对象只保留 `{ code, name }`，字符串原样保存 |
 | isPublic | boolean | 否 | `true` | 是否在公开应用中心展示，写入 `options.isPublic`；未设置视为公开 |
-| entries | array | 否 | `[]` | 应用入口 `[{ label, path }]`，写入 `options.entries`；`path` 相对应用根（缺前导 `/` 自动补），缺 `label` 或 `path` 的项丢弃，同 `path` 只保留第一项 |
+| entries | array | 否 | `[]` | 应用入口 `[{ label, path, showInCenter }]`，写入 `options.entries`；`path` 相对应用根（缺前导 `/` 自动补），缺 `label` 或 `path` 的项丢弃，同 `path` 只保留第一项；`showInCenter` 为是否开放给前台（默认 `true`），为 `false` 时应用中心列表与 PWA 不返回该入口，管理端仍可见 |
 | env | object | 否 | `{}` | 应用自有环境变量 |
 | pm2Config | object | 否 | `{}` | PM2 覆盖项 |
 | options | object | 否 | `{}` | 扩展字段；可含 `secretEnvKeys: string[]` 显式密钥键名 |
@@ -418,6 +421,13 @@ data: {"progressId":"p-1","step":"ready","status":"done","detail":null,"message"
 
 返回 `{ pageData, totalCount }`，元素均为脱敏后的应用对象。
 
+#### 应用分类 `{prefix}/group/*`
+
+`enableGroup` 不为 `false` 时，插件内部注册 `@kne/fastify-group`，接口与其一致：`GET group/list`、`GET group/group-list`、`GET group/detail`、`POST group/save`、`POST group/remove`。应用分类使用 `type: 'app'`。
+
+- 读接口（`list` / `group-list` / `detail`）**无需登录**，未登录的公开应用中心也能显示分类名称
+- 写接口（`save` / `remove`）使用 `createAuthenticate` 鉴权
+
 #### GET `{prefix}/app/center/list`
 
 应用中心列表，使用 `createUserAuthenticate` 鉴权（普通登录用户可访问）。仅返回 `status: 'running'` 的应用，且只含公开字段（不含 env、端口、路径等）。
@@ -434,8 +444,8 @@ data: {"progressId":"p-1","step":"ready","status":"done","detail":null,"message"
       "isPublic": true,
       "pathUrl": "/app/demo/",
       "entries": [
-        { "label": "PC", "path": "/", "url": "/app/demo/" },
-        { "label": "移动端", "path": "/mobile", "url": "/app/demo/mobile" }
+        { "label": "PC", "path": "/", "showInCenter": true, "url": "/app/demo/" },
+        { "label": "移动端", "path": "/mobile", "showInCenter": true, "url": "/app/demo/mobile" }
       ],
       "deployment": null
     }
@@ -443,6 +453,8 @@ data: {"progressId":"p-1","step":"ready","status":"done","detail":null,"message"
   "totalCount": 1
 }
 ```
+
+`entries` 只含 `showInCenter` 不为 `false` 的入口。
 
 `deployment`：部署或启动补回部署目录进行中时为 `{ source: 'deploy' | 'restore' }`，此时应用暂不可访问；否则为 `null`。
 
@@ -742,7 +754,7 @@ data: {"name":"demo","ts":1791456608533,...}
 | description | string / null | 描述 |
 | env | object | 自有环境变量 |
 | pm2Config | object | PM2 覆盖 |
-| options | object | 扩展字段；`secretEnvKeys` 为显式密钥键名列表，`category` 为应用分类，`isPublic` 为是否公开（未设置视为公开），`entries` 为应用入口 `[{ label, path }]` |
+| options | object | 扩展字段；`secretEnvKeys` 为显式密钥键名列表，`category` 为应用分类，`isPublic` 为是否公开（未设置视为公开），`entries` 为应用入口 `[{ label, path, showInCenter }]` |
 | port | number | 分配端口 |
 | status | string | `idle` / `deploying` / `running` / `stopped` / `error` |
 | currentVersionId | string / null | 当前部署版本 id |

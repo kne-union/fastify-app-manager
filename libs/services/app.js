@@ -62,7 +62,7 @@ module.exports = fp(async (fastify, options) => {
     }
     return category.code ? { code: category.code, name: category.name || category.code } : null;
   };
-  // 应用入口：label + 相对应用根的 path；去空、补前导 /、按 path 去重
+  // 应用入口：label + 相对应用根的 path；去空、补前导 /、按 path 去重；showInCenter 未设置视为开放给前台
   const normalizeEntries = entries => {
     const seen = new Set();
     return (Array.isArray(entries) ? entries : []).reduce((result, item) => {
@@ -74,7 +74,7 @@ module.exports = fp(async (fastify, options) => {
       const entryPath = rawPath.startsWith('/') ? rawPath : `/${rawPath}`;
       if (!seen.has(entryPath)) {
         seen.add(entryPath);
-        result.push({ label, path: entryPath });
+        result.push({ label, path: entryPath, showInCenter: item?.showInCenter !== false });
       }
       return result;
     }, []);
@@ -266,7 +266,7 @@ module.exports = fp(async (fastify, options) => {
           category: app.options?.category || null,
           isPublic: isAppPublic(app),
           pathUrl: `${mountPrefix(app.name)}/`,
-          entries: resolveEntries(app),
+          entries: resolveEntries(app).filter(entry => entry.showInCenter),
           deployment: active ? { source: active.source } : null
         };
       });

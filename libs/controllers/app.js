@@ -30,7 +30,7 @@ module.exports = fp(async (fastify, options) => {
             isPublic: { type: 'boolean' },
             entries: {
               type: ['array', 'null'],
-              items: { type: 'object', properties: { label: { type: 'string' }, path: { type: 'string' } } }
+              items: { type: 'object', properties: { label: { type: 'string' }, path: { type: 'string' }, showInCenter: { type: 'boolean' } } }
             },
             env: { type: 'object' },
             pm2Config: { type: 'object' },
@@ -61,7 +61,7 @@ module.exports = fp(async (fastify, options) => {
             isPublic: { type: 'boolean' },
             entries: {
               type: ['array', 'null'],
-              items: { type: 'object', properties: { label: { type: 'string' }, path: { type: 'string' } } }
+              items: { type: 'object', properties: { label: { type: 'string' }, path: { type: 'string' }, showInCenter: { type: 'boolean' } } }
             },
             env: { type: 'object' },
             pm2Config: { type: 'object' },
