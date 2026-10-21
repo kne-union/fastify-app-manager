@@ -241,6 +241,7 @@ describe('plugin integration', function () {
         entries: [
           { label: 'PC', path: '/' },
           { label: '移动端', path: 'mobile' },
+          { label: '管理端', path: '/admin', showInCenter: false },
           { label: '重复', path: '/mobile' },
           { label: '', path: '/empty-label' },
           { label: '无路径', path: '  ' }
@@ -248,8 +249,9 @@ describe('plugin integration', function () {
       }
     });
     expect(withEntries.json().entries).to.deep.equal([
-      { label: 'PC', path: '/', url: '/app/demo/' },
-      { label: '移动端', path: '/mobile', url: '/app/demo/mobile' }
+      { label: 'PC', path: '/', showInCenter: true, url: '/app/demo/' },
+      { label: '移动端', path: '/mobile', showInCenter: true, url: '/app/demo/mobile' },
+      { label: '管理端', path: '/admin', showInCenter: false, url: '/app/demo/admin' }
     ]);
     expect(withEntries.json().category).to.deep.equal({ code: 'tools', name: '工具' });
 
@@ -277,8 +279,8 @@ describe('plugin integration', function () {
       isPublic: true,
       pathUrl: '/app/demo/',
       entries: [
-        { label: 'PC', path: '/', url: '/app/demo/' },
-        { label: '移动端', path: '/mobile', url: '/app/demo/mobile' }
+        { label: 'PC', path: '/', showInCenter: true, url: '/app/demo/' },
+        { label: '移动端', path: '/mobile', showInCenter: true, url: '/app/demo/mobile' }
       ],
       deployment: null
     });
@@ -290,6 +292,8 @@ describe('plugin integration', function () {
     const manifest = await fastify.inject({ method: 'GET', url: '/api/v1/app-manager/app/center/webmanifest?name=demo&path=%2Fapp%2Fdemo%2Fmobile' });
     expect(manifest.headers['content-type']).to.contain('application/manifest+json');
     expect(manifest.json()).to.include({ id: '/app/demo/mobile', start_url: '/app/demo/mobile', scope: '/app/demo/', name: '移动端' });
+    const hiddenManifest = await fastify.inject({ method: 'GET', url: '/api/v1/app-manager/app/center/webmanifest?name=demo&path=%2Fapp%2Fdemo%2Fadmin' });
+    expect(hiddenManifest.json().start_url).to.not.equal('/app/demo/admin');
     const missingManifest = await fastify.inject({ method: 'GET', url: '/api/v1/app-manager/app/center/webmanifest?name=demo-social' });
     expect(missingManifest.statusCode).to.equal(404);
 
