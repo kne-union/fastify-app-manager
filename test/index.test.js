@@ -80,18 +80,31 @@ describe('@kne/fastify-app-manager', function () {
       expect(merged.DB_STORAGE).to.equal('/tmp/shared.db');
       expect(merged.PORT).to.equal('4001');
       const dedicated = resolveAppDbEnv({
-        appEnv: { DB_DIALECT: 'sqlite', DB_STORAGE: '/tmp/app.db' },
+        appEnv: { DB_DIALECT: 'sqlite', DB_STORAGE: '/tmp/app.db', DB_DEDICATED: 'true' },
         defaultAppDb: { dialect: 'sqlite', storage: '/tmp/shared.db' }
       });
       expect(dedicated.DB_STORAGE).to.equal('/tmp/app.db');
-      expect(resolveDbScope({ DB_DIALECT: 'sqlite', DB_STORAGE: '/tmp/app.db' })).to.equal('dedicated');
+      expect(resolveDbScope({ DB_DIALECT: 'sqlite', DB_STORAGE: '/tmp/app.db', DB_DEDICATED: 'true' })).to.equal('dedicated');
       expect(resolveDbScope({})).to.equal('shared');
     });
 
     it('should follow env db config over stale options.dbScope', () => {
-      const env = { DB_DIALECT: 'postgres', DB_HOST: '10.0.0.1', DB_DATABASE: 'app' };
+      const env = { DB_DIALECT: 'postgres', DB_HOST: '10.0.0.1', DB_DATABASE: 'app', DB_DEDICATED: 'true' };
       expect(resolveDbScope(env, { dbScope: 'shared' })).to.equal('dedicated');
       expect(resolveDbScope({}, { dbScope: 'dedicated' })).to.equal('shared');
+    });
+
+    it('should keep host db when app env has DB_* but DB_DEDICATED is not enabled', () => {
+      const appEnv = { DB_DIALECT: 'postgres', DB_HOST: '192.168.50.195', DB_PORT: '5434', DB_DATABASE: 'local', DB_PASSWORD: 'p', FOO: 'bar' };
+      const defaultAppDb = { dialect: 'postgres', host: 'shared-host', port: 3433, database: 'shared' };
+      expect(resolveDbScope(appEnv)).to.equal('shared');
+      const env = resolveAppDbEnv({ appEnv, defaultAppDb, appName: 'demo' });
+      expect(env.DB_HOST).to.equal('shared-host');
+      expect(env.DB_PORT).to.equal('3433');
+      expect(env.DB_DATABASE).to.equal('shared');
+      expect(env.DB_PASSWORD).to.equal(undefined);
+      expect(env.DB_TABLE_PREFIX).to.equal('t_demo_');
+      expect(env.FOO).to.equal('bar');
     });
 
     it('should fall back to shared db when DB_DEDICATED=false', () => {
@@ -110,7 +123,7 @@ describe('@kne/fastify-app-manager', function () {
 
     it('should only own prefixed tables in a dedicated db shared with other systems', () => {
       const allTables = ['t_talent_saas_user', 't_talent_saas_tenant', 't_account_user', 't_tenant_user', '_fs_sql_migrations'];
-      const env = { DB_DIALECT: 'postgres', DB_HOST: '10.0.0.1', DB_DATABASE: 'app' };
+      const env = { DB_DIALECT: 'postgres', DB_HOST: '10.0.0.1', DB_DATABASE: 'app', DB_DEDICATED: 'true' };
       expect(filterOwnedTables({ appEnv: Object.assign({ DB_TABLE_PREFIX: 't_talent_saas_' }, env), allTables })).to.deep.equal(['t_talent_saas_user', 't_talent_saas_tenant']);
       expect(filterOwnedTables({ appEnv: env, allTables })).to.deep.equal(['t_talent_saas_user', 't_talent_saas_tenant', 't_account_user', 't_tenant_user']);
       expect(filterOwnedTables({ appEnv: {}, ownedTables: ['t_account_user', 'missing'], allTables })).to.deep.equal(['t_account_user']);
@@ -132,7 +145,7 @@ describe('@kne/fastify-app-manager', function () {
       });
       expect(custom.DB_TABLE_PREFIX).to.equal('t_custom_');
       const dedicated = mergeEnv({
-        appEnv: { DB_DIALECT: 'sqlite', DB_STORAGE: '/tmp/app.db' },
+        appEnv: { DB_DIALECT: 'sqlite', DB_STORAGE: '/tmp/app.db', DB_DEDICATED: 'true' },
         port: 4001,
         appName: 'ai-talent-saas'
       });
