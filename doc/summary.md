@@ -32,7 +32,7 @@ Client / Admin UI
 | Domain gateway | Host 精确匹配且状态为 `running` 时透明反代，不改写路径 |
 | Path gateway | `/app/{name}` 剥前缀；改写绝对路径 Location、Cookie Path、文本类 body |
 | 未运行兜底 | 应用存在但未 `running` 时，网关返回 503 状态页（已停止 / 启动中 / 异常 / 未部署），接口请求返回 JSON，不再落到宿主 404；`/app/{name}` 下应用不存在时返回 404「应用不存在」页 |
-| PM2 | 每应用一进程，名 `app-manager__{hostName}__{name}`（`hostName` 默认取 `cwd` 的 `package.json` 的 `name`，`cwd` 为 `server` 目录时取上一级）；stdout/stderr 由 PM2 落 `appsRoot/{name}/logs`，插件按大小/按天切分归档 |
+| PM2 | 每应用一进程，名 `app-manager__{hostName}__{name}`（`hostName` 默认取 `cwd` 的 `package.json` 的 `name`，宿主须把 `server/package.json` 的 `name` 写成宿主名，或显式传 `hostName`）；stdout/stderr 由 PM2 落 `appsRoot/{name}/logs`，插件按大小/按天切分归档 |
 | Bootstrap | `onReady` 连接 PM2、挂 log bus（只推 SSE）、启动日志切分与负载采样定时器；**异步**并行：目录完好的托管应用立即 `syncAllStatuses`，缺当前版本目录的应用按版本 `fileId` 逐个补回后再单独拉起，最后清理非当前版本目录（均不阻塞父应用 ready） |
 
 #### 部署时序

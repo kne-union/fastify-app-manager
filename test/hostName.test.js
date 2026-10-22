@@ -21,17 +21,15 @@ describe('hostName', () => {
     expect(normalizeHostName('')).to.equal('');
   });
 
-  it('should take the parent package.json when cwd is a server directory', async () => {
+  it('should only take the cwd package.json even when cwd is a server directory', async () => {
     const project = path.join(root, 'project');
-    await fs.writeJson(path.join(root, 'package.json'), { name: 'outside' });
     await fs.outputJson(path.join(project, 'package.json'), { name: '@kne/ai-talent-saas' });
-    await fs.outputJson(path.join(project, 'server', 'package.json'), { name: 'server' });
-    expect(resolveHostName(path.join(project, 'server'))).to.equal('kne-ai-talent-saas');
+    await fs.outputJson(path.join(project, 'server', 'package.json'), { name: 'ai-talent-saas' });
+    expect(resolveHostName(path.join(project, 'server'))).to.equal('ai-talent-saas');
   });
 
-  it('should fall back to the server package.json when the parent has none', async () => {
-    await fs.outputJson(path.join(root, 'server', 'package.json'), { name: 'host-server' });
-    expect(resolveHostName(path.join(root, 'server'))).to.equal('host-server');
+  it('should return empty when cwd has no package.json', () => {
+    expect(resolveHostName(path.join(root, 'missing'))).to.equal('');
   });
 
   it('should take the cwd package.json when cwd is not a server directory', async () => {
