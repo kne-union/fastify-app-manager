@@ -26,12 +26,12 @@ const hasAppDbConfig = (appEnv = {}) => {
 const DB_DEDICATED_KEY = 'DB_DEDICATED';
 const DB_CONNECTION_KEYS = ['DB_DIALECT', 'DB_HOST', 'DB_PORT', 'DB_DATABASE', 'DB_USERNAME', 'DB_PASSWORD', 'DB_STORAGE'];
 
-// 配好独立库后默认启用；DB_DEDICATED=false 时保留配置但回落共享库
+// 仅 DB_DEDICATED=true 时启用独立库；否则即使 env 里有 DB_*（如导入的本地 .env）也用宿主注入的连接
 const isAppDbEnabled = (appEnv = {}) =>
   hasAppDbConfig(appEnv) &&
   String(appEnv[DB_DEDICATED_KEY] ?? '')
     .trim()
-    .toLowerCase() !== 'false';
+    .toLowerCase() === 'true';
 
 const omitDbConnection = (appEnv = {}) => {
   const next = Object.assign({}, appEnv);

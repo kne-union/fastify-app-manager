@@ -92,7 +92,7 @@ deploy(versionId)
 | `save-env` patch | `null` 删除键；`********` 对 secret 键表示保持原值 |
 | 显式密钥 | 存于 `options.secretEnvKeys`；`save-env` 可传 `secretEnvKeys` 将普通键标为密钥；响应顶层回传合并后的键名列表（不含明文） |
 | 默认托管库 | `defaultAppDb`（默认 `appsRoot/_shared/apps-data.sqlite`），与宿主主库强制分离；应用未配 `DB_*` 时注入 |
-| 应用自有库 | 应用 `env` 含完整 `DB_*` 且 `DB_DEDICATED` 不为 `false` 时为独享库（`dbScope=dedicated`）；`DB_DEDICATED=false` 保留配置但回落共享库。`dbScope` 始终由 env 推导，与启动注入的连接一致；独享库若带 `DB_TABLE_PREFIX`（与其它系统共用库）只认该前缀的表 |
+| 应用自有库 | 应用 `env` 含完整 `DB_*` 且 `DB_DEDICATED=true` 时才为独享库（`dbScope=dedicated`）；未开启时即使 `env` 里有 `DB_*`（如导入的本地 `.env`）也不会覆盖宿主注入的连接，配置保留、回落共享库。`dbScope` 始终由 env 推导，与启动注入的连接一致；独享库若带 `DB_TABLE_PREFIX`（与其它系统共用库）只认该前缀的表 |
 | 共享库表前缀 | 启动时注入 `DB_TABLE_PREFIX=t_{appName}_` 并由系统写回应用 env（接口不返回、不可修改）；子应用 sequelize 须读取该变量建表 |
 | 表归属 | `options.ownedTables`；共享库启动就绪后按前缀自动认领，亦可 `sync-owned` 扫描；运维仅限归属表 |
 | 变量声明 | 子应用在 `server/env.schema.json` 声明所需变量（标准 JSON Schema，必填放顶层 `required`，敏感值 `writeOnly`）；上传缺失即拒绝，启动前（deploy / start / restart / 恢复）按它校验最终变量；`GET .../app/env/schema` 列出需要用户填写的变量，隐藏 `PORT`、托管库 `DB_*`、系统变量等应用中心注入的键 |
