@@ -6,7 +6,7 @@
 | `prefix` | string | 否 | `'/api/v1/app-manager'` | 管理 API 前缀 |
 | `dbTableNamePrefix` | string | 否 | `'t_app_manager_'` | Sequelize 表名前缀 |
 | `appsRoot` | string | 否 | `cwd/managed-apps` | 应用落盘根目录 |
-| `hostName` | string | 否 | `cwd` 的 `package.json` 的 `name` | 宿主名，拼进 PM2 进程名 `app-manager__{hostName}__{name}`，多个宿主共用 PM2 时避免同名应用互相覆盖。不传时取 `cwd` 下 `package.json` 的 `name`；`cwd` 为 `server` 目录时优先取上一级 `package.json` 的 `name`（宿主 `server/package.json` 常叫 `server`）；`@` 去掉、`/` 等字符换成 `-`。启动时库里旧规则的进程名会改成新名，旧进程仅在其工作目录位于该应用目录下时删除 |
+| `hostName` | string | 否 | `cwd` 的 `package.json` 的 `name` | 宿主名，拼进 PM2 进程名 `app-manager__{hostName}__{name}`，多个宿主共用 PM2 时避免同名应用互相覆盖。不传时取 `cwd` 下 `package.json` 的 `name`（不读上一级：Docker 部署通常只拷 `server/`），宿主须把 `server/package.json` 的 `name` 写成宿主名（勿用 `server`）；`@` 去掉、`/` 等字符换成 `-`。启动时库里旧规则的进程名会改成新名，旧进程仅在其工作目录位于该应用目录下时删除 |
 | `portMin` | number | 否 | `4000` | 端口池下限（含） |
 | `portMax` | number | 否 | `7999` | 端口池上限（含） |
 | `pathPrefix` | string | 否 | `'/app'` | 路径访问前缀（无尾斜杠亦可） |

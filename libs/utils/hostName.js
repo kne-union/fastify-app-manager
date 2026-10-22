@@ -20,13 +20,9 @@ const readPackageName = dir => {
 };
 
 /**
- * 取 cwd 的 package.json name；cwd 为 server 目录时优先取上一级（宿主 server/package.json 常叫 server，区分不了宿主）。
+ * 取 cwd 的 package.json name。不读上一级：Docker 部署通常只拷 server 目录，宿主须把 server/package.json 的 name 写成宿主名，或显式传 hostName。
  */
-const resolveHostName = (cwd = process.cwd()) => {
-  const dir = path.resolve(cwd);
-  const parentName = path.basename(dir) === 'server' ? readPackageName(path.dirname(dir)) : null;
-  return normalizeHostName(parentName || readPackageName(dir));
-};
+const resolveHostName = (cwd = process.cwd()) => normalizeHostName(readPackageName(path.resolve(cwd)));
 
 const createPm2Name = (hostName, name) => (hostName ? `${PM2_NAME_PREFIX}${hostName}__${name}` : `${PM2_NAME_PREFIX}${name}`);
 
