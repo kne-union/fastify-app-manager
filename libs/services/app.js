@@ -30,6 +30,7 @@ const { readSqlDir, writeSqlDir } = require('../utils/versionSql');
 const { createDeployProgress } = require('../utils/deployProgress');
 const pwaDocument = require('@kne/pwa-document');
 const pm2Util = require('../utils/pm2');
+const { KIND_MANAGED, KIND_LINKED, isLinked, linkedBaseUrl, assertNotLinked } = require('../utils/appKind');
 
 const NAME_RE = /^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$/;
 
@@ -81,8 +82,14 @@ module.exports = fp(async (fastify, options) => {
     }, []);
   };
   const resolveEntries = appLike => {
-    const base = mountPrefix(appLike.name);
-    return normalizeEntries(appLike.options?.entries).map(entry => Object.assign({}, entry, { url: `${base}${entry.path}` }));
+    const linked = isLinked(appLike);
+    const remote = linked ? linkedBaseUrl(appLike) : null;
+    const base = remote || mountPrefix(appLike.name);
+    return normalizeEntries(appLike.options?.entries).map(entry => {
+      const pathPart = entry.path.startsWith('/') ? entry.path : `/${entry.path}`;
+      const url = remote ? `${remote}${pathPart}` : `${base}${pathPart}`;
+      return Object.assign({}, entry, { path: remote ? url : entry.path, url });
+    });
   };
 
   const toPublicApp = app => {
@@ -95,7 +102,11 @@ module.exports = fp(async (fastify, options) => {
     json.env = maskEnvForResponse(json.env || {}, envOpts);
     json.passthroughEnvKeys = options.passthroughEnvKeys || [];
     json.secretEnvKeys = collectSecretKeys(json.env || {}, envOpts);
-    json.pathUrl = `${mountPrefix(json.name)}/`;
+    const linked = isLinked(json);
+    const remote = linked ? linkedBaseUrl(json) : null;
+    json.pathUrl = remote ? `${remote}/` : `${mountPrefix(json.name)}/`;
+    json.openUrl = json.pathUrl;
+    json.kind = linked ? KIND_LINKED : KIND_MANAGED;
     json.category = json.options?.category || null;
     json.isPublic = isAppPublic(json);
     json.entries = resolveEntries(json);
@@ -159,6 +170,7 @@ module.exports = fp(async (fastify, options) => {
     const app = await models.app.create({
       name,
       label,
+      kind: KIND_MANAGED,
       domain: domain || null,
       icon: icon || null,
       description: description || null,
@@ -218,6 +230,9 @@ module.exports = fp(async (fastify, options) => {
 
   const saveEnv = async ({ name, env, secretEnvKeys: nextSecretKeys } = {}) => {
     const app = await getByName(name);
+    if (isLinked(app)) {
+      httpError(400, '外部应用环境变量只读，请在远程部署侧修改后重启');
+    }
     // 密钥类型不可撤销，只随变量删除而移除
     const secretEnvKeys = normalizeSecretKeys([...resolveSecretEnvKeys(app), ...(nextSecretKeys || [])]);
     // PORT 由端口池分配，启动时总会覆盖，不接受外部写入
@@ -259,15 +274,29 @@ module.exports = fp(async (fastify, options) => {
       .filter(app => !publicOnly || isAppPublic(app))
       .map(app => {
         const active = deployProgress.active(app.name);
+        const linked = isLinked(app);
+        const base = linked ? linkedBaseUrl(app) : null;
+        const pathUrl = linked && base ? `${base}/` : `${mountPrefix(app.name)}/`;
+        const entries = resolveEntries(app)
+          .filter(entry => entry.showInCenter)
+          .map(entry =>
+            linked && base
+              ? Object.assign({}, entry, {
+                  path: entry.path.startsWith('http') ? entry.path : `${base}${entry.path.startsWith('/') ? '' : '/'}${entry.path}`
+                })
+              : entry
+          );
         return {
           name: app.name,
           label: app.label,
+          kind: linked ? KIND_LINKED : KIND_MANAGED,
           icon: app.icon,
           description: app.description,
           category: app.options?.category || null,
           isPublic: isAppPublic(app),
-          pathUrl: `${mountPrefix(app.name)}/`,
-          entries: resolveEntries(app).filter(entry => entry.showInCenter),
+          pathUrl,
+          openUrl: pathUrl,
+          entries,
           deployment: active ? { source: active.source } : null
         };
       });
@@ -369,6 +398,7 @@ module.exports = fp(async (fastify, options) => {
     if (!app) {
       httpError(404, `app ${name} not found; create it first`);
     }
+    assertNotLinked(app, '版本上传');
     // The (app_name, version) unique index also covers soft-deleted rows, so they must be purged before reuse.
     const dup = await models.appVersion.findOne({ where: { appName: name, version }, paranoid: false });
     if (dup && !dup.isSoftDeleted()) {
@@ -789,7 +819,7 @@ module.exports = fp(async (fastify, options) => {
     const excluded = new Set(excludeIds.map(String));
     const results = [];
     for (const app of apps) {
-      if (excluded.has(String(app.id))) {
+      if (excluded.has(String(app.id)) || isLinked(app)) {
         continue;
       }
       const shouldRecover = recoverIfMissing && (app.status === 'running' || app.status === 'deploying');
@@ -905,6 +935,9 @@ module.exports = fp(async (fastify, options) => {
    */
   const getEnvDeclaration = async ({ name, versionId } = {}) => {
     const app = await getByName(name);
+    if (isLinked(app)) {
+      return fastify[options.name].services.link.proxy.env(app);
+    }
     const ver = await resolveDeclarationVersion(app, versionId);
     const schema = ver ? await getVersionEnvSchema(ver) : null;
     const injected = listInjectedEnvKeys(app);
@@ -1012,6 +1045,9 @@ module.exports = fp(async (fastify, options) => {
     const apps = await models.app.findAll({ where: { currentVersionId: { [Op.ne]: null } } });
     const missing = [];
     for (const app of apps) {
+      if (isLinked(app)) {
+        continue;
+      }
       const ver = await models.appVersion.findByPk(app.currentVersionId);
       if (ver && !(await fs.pathExists(path.join(ver.artifactPath, 'server')))) {
         missing.push({ app, ver });
@@ -1119,6 +1155,7 @@ module.exports = fp(async (fastify, options) => {
 
   const deploy = async ({ name, versionId, version, runMigration = true, migrations, progressId }) => {
     const app = await getByName(name);
+    assertNotLinked(app, '部署');
     let ver = null;
     if (versionId) {
       ver = await models.appVersion.findByPk(versionId);
@@ -1250,6 +1287,7 @@ module.exports = fp(async (fastify, options) => {
 
   const stop = async ({ name }) => {
     const app = await getByName(name);
+    assertNotLinked(app, '停止');
     try {
       await pm2Util.stopApp(app.pm2Name);
     } catch (e) {
@@ -1276,6 +1314,7 @@ module.exports = fp(async (fastify, options) => {
 
   const start = async ({ name }) => {
     const app = await getByName(name);
+    assertNotLinked(app, '启动');
     const env = await prepareStartEnv(app);
     await app.update({ status: 'deploying', message: null });
     try {
@@ -1291,6 +1330,7 @@ module.exports = fp(async (fastify, options) => {
 
   const restart = async ({ name }) => {
     const app = await getByName(name);
+    assertNotLinked(app, '重启');
     const env = await prepareStartEnv(app);
     await app.update({ status: 'deploying', message: null });
     try {
@@ -1312,21 +1352,24 @@ module.exports = fp(async (fastify, options) => {
 
   const remove = async ({ name, exportBeforeRemove = true, cleanupData = true, allowRemoveIfCleanupIncomplete = false, force = false, removeSqliteFile = false } = {}) => {
     const app = await getByName(name);
-    try {
-      await pm2Util.deleteProcess(app.pm2Name);
-    } catch (e) {
-      // ignore
+    const linked = isLinked(app);
+    if (!linked && app.pm2Name) {
+      try {
+        await pm2Util.deleteProcess(app.pm2Name);
+      } catch (e) {
+        // ignore
+      }
     }
 
     const dbops = fastify[options.name].services.dbops;
     let exportResult = null;
     let cleanupResult = null;
 
-    if (exportBeforeRemove && !force) {
+    if (!linked && exportBeforeRemove && !force) {
       exportResult = await dbops.exportData({ name });
     }
 
-    if (cleanupData) {
+    if (!linked && cleanupData) {
       cleanupResult = await dbops.cleanup({ name, removeSqliteFile });
       if (cleanupResult.manualRequired && !allowRemoveIfCleanupIncomplete) {
         return {
@@ -1341,7 +1384,9 @@ module.exports = fp(async (fastify, options) => {
     const snapshot = app.toJSON();
     await models.appVersion.destroy({ where: { appName: name } });
     await models.appOpenApiRecord.destroy({ where: { appName: name }, force: true });
-    await fs.remove(app.rootPath).catch(() => {});
+    if (!linked && app.rootPath) {
+      await fs.remove(app.rootPath).catch(() => {});
+    }
     deployProgress.clear(app.name);
     await app.destroy();
     if (typeof options.onAppRemoved === 'function') {
@@ -1376,12 +1421,18 @@ module.exports = fp(async (fastify, options) => {
 
   const logs = async ({ name, stream = 'out', file, perPage = 100, currentPage = 1, beforeLine } = {}) => {
     const app = await getByName(name);
+    if (isLinked(app)) {
+      return fastify[options.name].services.link.proxy.logs(app, { stream, file, perPage, currentPage, beforeLine });
+    }
     const filePath = file ? await resolveExistingLogFile(app, file) : currentLogFile(app, stream);
     return readLogTail(filePath, { perPage, currentPage, beforeLine, timezone: options.logTimezone });
   };
 
   const logFiles = async ({ name }) => {
     const app = await getByName(name);
+    if (isLinked(app)) {
+      return fastify[options.name].services.link.proxy.logFiles(app);
+    }
     const pageData = (await listLogFiles(logsDirOf(app))).map(item => Object.assign({}, item, { mtime: toIsoInTz(item.mtime, options.logTimezone) }));
     return { pageData, totalCount: pageData.length };
   };

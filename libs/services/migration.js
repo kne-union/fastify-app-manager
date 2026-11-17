@@ -1,10 +1,12 @@
 const fp = require('fastify-plugin');
 const { isValidSqlFileName, readExecutedMigrations, recordMigration, removeMigrationRecord } = require('../utils/migrate');
+const { isLinked } = require('../utils/appKind');
 
 module.exports = fp(async (fastify, options) => {
   const { models } = fastify[options.name];
   const getDbops = () => fastify[options.name].services.dbops;
   const getAppService = () => fastify[options.name].services.app;
+  const linkedProxy = () => fastify[options.name].services.link.proxy;
 
   const httpError = (statusCode, message) => {
     if (fastify.httpErrors) {
@@ -46,6 +48,10 @@ module.exports = fp(async (fastify, options) => {
   };
 
   const list = async ({ name, versionId }) => {
+    const appRow = await models.app.findOne({ where: { name } });
+    if (appRow && isLinked(appRow)) {
+      return linkedProxy().migrationsList(appRow);
+    }
     const { app, ver } = await resolveVersion({ name, versionId });
     const files = await getFiles(ver);
     let executedMap = new Map();
@@ -74,12 +80,20 @@ module.exports = fp(async (fastify, options) => {
   };
 
   const content = async ({ name, versionId, file }) => {
+    const appRow = await models.app.findOne({ where: { name } });
+    if (appRow && isLinked(appRow)) {
+      return linkedProxy().migrationsContent(appRow, { file });
+    }
     const { ver } = await resolveVersion({ name, versionId });
     const item = await findFile(ver, file);
     return { name: file, content: item.content || '' };
   };
 
   const save = async ({ name, versionId, file, content: sql }) => {
+    const appRow = await models.app.findOne({ where: { name } });
+    if (appRow && isLinked(appRow)) {
+      httpError(400, '外部关联应用不支持在平台侧编辑迁移脚本');
+    }
     assertFileName(file);
     const { ver } = await resolveVersion({ name, versionId });
     const files = (await getFiles(ver)).filter(f => f.name !== file);
@@ -89,6 +103,10 @@ module.exports = fp(async (fastify, options) => {
   };
 
   const remove = async ({ name, versionId, file }) => {
+    const appRow = await models.app.findOne({ where: { name } });
+    if (appRow && isLinked(appRow)) {
+      httpError(400, '外部关联应用不支持在平台侧删除迁移脚本');
+    }
     const { ver } = await resolveVersion({ name, versionId });
     await findFile(ver, file);
     await getAppService().saveMigrationFiles(
@@ -133,6 +151,10 @@ module.exports = fp(async (fastify, options) => {
   };
 
   const action = async ({ action: type, ...props }) => {
+    const appRow = props.name ? await models.app.findOne({ where: { name: props.name } }) : null;
+    if (appRow && isLinked(appRow)) {
+      return linkedProxy().migrationsAction(appRow, { file: props.file, action: type });
+    }
     if (type === 'execute') return execute(props);
     if (type === 'mark') return mark(props);
     if (type === 'unmark') return unmark(props);

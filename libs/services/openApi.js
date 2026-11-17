@@ -15,6 +15,8 @@ module.exports = fp(async (fastify, options) => {
     throw err;
   };
 
+  const { isLinked, linkedBaseUrl } = require('../utils/appKind');
+
   const getRunningApp = async (name, hook) => {
     if (typeof options[hook] !== 'function') {
       httpError(400, `未配置 ${hook}，无法访问子应用接口文档（见 README「应用 OIDC 对接」）`);
@@ -26,11 +28,22 @@ module.exports = fp(async (fastify, options) => {
     return app;
   };
 
+  const openApiUrl = app => {
+    if (isLinked(app)) {
+      const base = linkedBaseUrl(app);
+      if (!base) {
+        httpError(400, `应用 ${app.name} 缺少 options.baseUrl`);
+      }
+      return `${base}/open-api.json`;
+    }
+    return `http://${options.upstreamHost}:${app.port}/open-api.json`;
+  };
+
   /** 以 open-api:read 服务令牌读取子应用 /open-api.json，原样返回 */
   const getDocument = async ({ name }) => {
     const app = await getRunningApp(name, 'getOpenApiToken');
     const token = await options.getOpenApiToken(app);
-    const response = await fetch(`http://${options.upstreamHost}:${app.port}/open-api.json`, {
+    const response = await fetch(openApiUrl(app), {
       headers: { authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(15000)
     });

@@ -274,11 +274,13 @@ describe('plugin integration', function () {
     expect(demoItem).to.deep.equal({
       name: 'demo',
       label: 'Demo Updated',
+      kind: 'managed',
       icon: null,
       description: 'd',
       category: { code: 'tools', name: '工具' },
       isPublic: true,
       pathUrl: '/app/demo/',
+      openUrl: '/app/demo/',
       entries: [
         { label: 'PC', path: '/', showInCenter: true, url: '/app/demo/' },
         { label: '移动端', path: '/mobile', showInCenter: true, url: '/app/demo/mobile' }

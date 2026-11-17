@@ -55,6 +55,18 @@ module.exports = fp(
         getOpenApiToken: null,
         /** async ({ app, userId, tenantId }) => accessToken，以登录用户身份签发子应用令牌；不传则 /app/open-api/token 不可用 */
         issueUserAccessToken: null,
+        /**
+         * 外部关联（linked）应用：
+         * - origin：本平台对外 ORIGIN，须与 installKey.platformOrigin 一致
+         * - signPlatformAssertion / ensureLinkedRegistration / getOpsServiceToken：通常来自 createAppOidc 返回值
+         * - linkSyncIntervalMs：定时同步权限/健康，0 表示仅启动时同步一次
+         */
+        origin: null,
+        signPlatformAssertion: null,
+        ensureLinkedRegistration: null,
+        getOpsServiceToken: null,
+        linkSyncIntervalMs: 5 * 60 * 1000,
+        linkProxyTimeoutMs: 15000,
         /** async ({ fileId, name, version, request }) => Buffer，版本上传传 fileId 时读取宿主文件 */
         resolveVersionFile: null,
         secretEnvKeyPattern: /(SECRET|PASSWORD|TOKEN|KEY|PRIVATE)/i,

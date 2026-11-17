@@ -13,11 +13,17 @@ module.exports = ({ DataTypes }) => {
         allowNull: false,
         comment: '用户可见应用名'
       },
+      kind: {
+        type: DataTypes.STRING,
+        allowNull: false,
+        defaultValue: 'managed',
+        comment: 'managed=本机托管 | linked=外部关联'
+      },
       domain: {
         type: DataTypes.STRING,
         allowNull: true,
         unique: true,
-        comment: '绑定域名 Host'
+        comment: '绑定域名 Host；linked 必须为空'
       },
       icon: {
         type: DataTypes.STRING,
@@ -45,12 +51,12 @@ module.exports = ({ DataTypes }) => {
         type: DataTypes.JSON,
         allowNull: false,
         defaultValue: {},
-        comment: '扩展字段'
+        comment: '扩展字段（linked 含 baseUrl / linkStatus / permissionsSnapshot）'
       },
       port: {
         type: DataTypes.INTEGER,
-        allowNull: false,
-        comment: '分配端口'
+        allowNull: true,
+        comment: '分配端口；linked 可空'
       },
       status: {
         type: DataTypes.STRING,
@@ -65,14 +71,14 @@ module.exports = ({ DataTypes }) => {
       },
       rootPath: {
         type: DataTypes.STRING,
-        allowNull: false,
-        comment: '应用根目录'
+        allowNull: true,
+        comment: '应用根目录；linked 可空'
       },
       pm2Name: {
         type: DataTypes.STRING,
-        allowNull: false,
+        allowNull: true,
         unique: true,
-        comment: 'PM2 进程名'
+        comment: 'PM2 进程名；linked 可空'
       },
       message: {
         type: DataTypes.TEXT,
@@ -82,7 +88,7 @@ module.exports = ({ DataTypes }) => {
     },
     options: {
       comment: '托管应用',
-      indexes: [{ fields: ['status'] }, { fields: ['domain'] }]
+      indexes: [{ fields: ['status'] }, { fields: ['domain'] }, { fields: ['kind'] }]
     }
   };
 };
