@@ -11,3 +11,6 @@ jobs:
     secrets: inherit
     with:
       package_name: '@kne/fastify-app-manager'
+      run_test: true
+      install-command: npm install
+      test-command: npm test
