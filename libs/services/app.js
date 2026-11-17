@@ -81,6 +81,18 @@ module.exports = fp(async (fastify, options) => {
       return result;
     }, []);
   };
+  /** 详情「主页」Tab / iframe 地址：相对应用根，默认 /；允许完整 http(s) URL */
+  const normalizeHomePath = value => {
+    if (value == null || value === '') {
+      return '/';
+    }
+    const raw = String(value).trim();
+    if (/^https?:\/\//i.test(raw)) {
+      return raw.replace(/\/+$/, '') || raw;
+    }
+    const path = raw.startsWith('/') ? raw : `/${raw}`;
+    return path.length > 1 ? path.replace(/\/+$/, '') : '/';
+  };
   const resolveEntries = appLike => {
     const linked = isLinked(appLike);
     const remote = linked ? linkedBaseUrl(appLike) : null;
@@ -109,6 +121,7 @@ module.exports = fp(async (fastify, options) => {
     json.kind = linked ? KIND_LINKED : KIND_MANAGED;
     json.category = json.options?.category || null;
     json.isPublic = isAppPublic(json);
+    json.homePath = normalizeHomePath(json.options?.homePath);
     json.entries = resolveEntries(json);
     return json;
   };
@@ -122,7 +135,7 @@ module.exports = fp(async (fastify, options) => {
   };
 
   const create = async data => {
-    const { name, label, domain, icon, description, category, isPublic, entries, env, pm2Config, options: appOptions } = data;
+    const { name, label, domain, icon, description, category, isPublic, entries, homePath, env, pm2Config, options: appOptions } = data;
     if (!name || !NAME_RE.test(name)) {
       httpError(400, 'invalid name: use lowercase slug [a-z0-9-]');
     }
@@ -166,6 +179,11 @@ module.exports = fp(async (fastify, options) => {
     if (entries !== undefined) {
       normalizedOptions.entries = normalizeEntries(entries);
     }
+    if (homePath !== undefined || normalizedOptions.homePath !== undefined) {
+      normalizedOptions.homePath = normalizeHomePath(homePath !== undefined ? homePath : normalizedOptions.homePath);
+    } else {
+      normalizedOptions.homePath = '/';
+    }
 
     const app = await models.app.create({
       name,
@@ -186,9 +204,9 @@ module.exports = fp(async (fastify, options) => {
     return toPublicApp(app);
   };
 
-  const save = async ({ name, category, isPublic, entries, ...data }) => {
+  const save = async ({ name, category, isPublic, entries, homePath, ...data }) => {
     const app = await getByName(name);
-    const omit = ['name', 'port', 'rootPath', 'pm2Name', 'status', 'currentVersionId'];
+    const omit = ['name', 'port', 'rootPath', 'pm2Name', 'status', 'currentVersionId', 'homePath', 'kind', 'pathUrl', 'openUrl', 'entries', 'category', 'isPublic', 'secretEnvKeys', 'passthroughEnvKeys'];
     const patch = {};
     for (const [k, v] of Object.entries(data)) {
       if (omit.includes(k) || v === undefined) {
@@ -223,6 +241,9 @@ module.exports = fp(async (fastify, options) => {
     }
     if (entries !== undefined) {
       patch.options = Object.assign({}, patch.options || app.options || {}, { entries: normalizeEntries(entries) });
+    }
+    if (homePath !== undefined) {
+      patch.options = Object.assign({}, patch.options || app.options || {}, { homePath: normalizeHomePath(homePath) });
     }
     await app.update(patch);
     return toPublicApp(app);
@@ -715,6 +736,11 @@ module.exports = fp(async (fastify, options) => {
       const app = await models.app.findByPk(appId);
       if (!app) {
         return null;
+      }
+      if (isLinked(app)) {
+        // linked 无 PM2：状态来自远程健康检查与权限同步
+        await fastify[options.name].services.link.syncOne(app);
+        return toPublicApp(await models.app.findByPk(appId));
       }
       try {
         let pm2Status = await getPm2ProcessStatus(app.pm2Name);

@@ -732,7 +732,7 @@ data: {"name":"demo","ts":1791456608533,...}
 | 方法签名 | 说明 |
 |----------|------|
 | `onReady()` | `ensureSchema` 后连接 PM2、挂 log bus、启动日志切分与负载采样定时器，并 **setImmediate** 异步执行 `recoverOnStartup`，以及一次 `rotateLogs` 与一次 `sampleLoad`（不阻塞父应用 ready） |
-| `ensureSchema()` | 宿主 `sync()` 不给已有表加列：为老库补齐后续新增的可空列（当前为 `appVersion.fileId`、`appVersion.migrationFiles`、`appVersion.envSchema`、`appOpenApiRecord.searchText`），可重复执行 |
+| `ensureSchema()` | 宿主 `sync()` 不给已有表加列：为老库补齐后续新增列/可空约束（含 `app.kind`、`appVersion.fileId|migrationFiles|envSchema`、`appOpenApiRecord.searchText`，并把 `port/rootPath/pm2Name` 改为可空），可重复执行；插件 `after` 与 `onReady` 都会调用。离线补齐见包内 `sql/host-upgrade-linked-kind.sql` |
 | `recoverOnStartup()` | 两路并行：部署目录完好的应用立即 `reconcile`；目录缺失的应用逐个 `restoreArtifact`（需重装依赖，较慢），每补完一个即单独 `syncStatus` 并按需拉起；补不回且原为 `running`/`deploying` 的标记 `error`；两路结束后 `pruneAllVersionArtifacts`。返回 `{ reconciled, restored, pruned }` |
 | `onClose()` | 停止切分与采样定时器并等待进行中的任务，断开 bus / PM2（由插件 `onClose` 调用） |
 | `rotateLogs({ now? })` | 立即执行一轮切分 + 压缩 + 保留清理；返回本轮切分的 `[{ name, stream, fileName, reason }]`，`reason` 为 `size` / `daily` |

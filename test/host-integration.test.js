@@ -135,7 +135,11 @@ describe('host integration', function () {
         },
         services: {
           resourceServer: { create: async payload => calls.push(['resourceServer', payload.identifier]) },
-          client: { create: async payload => calls.push(['client', payload.clientId, payload.metadata.backchannel_logout_uri]) }
+          client: {
+            create: async payload => calls.push(['client', payload.clientId, payload.metadata.backchannel_logout_uri]),
+            // ensureServiceClient 会补齐 allowedResources，再解密已有 secret
+            save: async () => {}
+          }
         }
       };
       const appOidc = createAppOidc({ oidc: fakeOidc }, hostOptions);

@@ -53,41 +53,53 @@ const asModulesTree = permissions => {
   return { modules: [] };
 };
 
+/** 外部应用顶层排在平台自有权限之后（tenant mergePermissions 按 index 降序） */
+const LINKED_APP_ROOT_INDEX = -1000;
+
 /**
  * @param {string} appName
  * @param {object|array} remotePermissions 远程返回
  * @param {object|null} previousTree 上一份已规范树（含顶层 appName）
+ * @param {{ label?: string, index?: number }} [meta] label 用应用显示名，勿用 slug
  */
-const mergeAppPermissionTree = (appName, remotePermissions, previousTree = null) => {
+const mergeAppPermissionTree = (appName, remotePermissions, previousTree = null, meta = {}) => {
   const name = String(appName);
   const remote = asModulesTree(remotePermissions);
   const liveCodes = flattenCodes(remote);
-  // 远程子树挂到 appName 顶层下；若远程已自带同名顶层则直接用
+  const prevRoot = previousTree?.modules?.[0];
+  const displayName = (meta.label && String(meta.label).trim()) || (prevRoot?.name && prevRoot.name !== name ? prevRoot.name : null) || name;
+  const rootIndex = meta.index != null ? meta.index : LINKED_APP_ROOT_INDEX;
+
+  // 远程子树挂到 appName 顶层下；若远程已自带同名顶层则取其 children，但 name 仍用应用显示名
   let children = remote.modules;
   if (children.length === 1 && children[0].code === name) {
     children = children[0].modules || children[0].permissions ? [children[0]] : children;
     if (children[0].code === name) {
-      const root = Object.assign({}, children[0], { modules: markStaleDeep(children[0].modules || [], liveCodes) });
+      const root = Object.assign({}, children[0], {
+        name: displayName,
+        code: name,
+        index: rootIndex,
+        modules: markStaleDeep(children[0].modules || [], liveCodes)
+      });
       // 合并 previous 中已 stale 但仍存在的叶子
-      if (previousTree?.modules?.[0]?.code === name) {
-        root.modules = mergeMissingStale(root.modules || [], previousTree.modules[0].modules || [], liveCodes);
+      if (prevRoot?.code === name) {
+        root.modules = mergeMissingStale(root.modules || [], prevRoot.modules || [], liveCodes);
       }
       return { modules: [root] };
     }
   }
 
   let modules = markStaleDeep(children, liveCodes);
-  if (previousTree?.modules?.[0]?.code === name) {
-    modules = mergeMissingStale(modules, previousTree.modules[0].modules || [], liveCodes);
+  if (prevRoot?.code === name) {
+    modules = mergeMissingStale(modules, prevRoot.modules || [], liveCodes);
   }
-
-  const label = (previousTree?.modules?.[0] && previousTree.modules[0].name) || (remote.modules?.[0] && remote.modules[0].name) || name;
 
   return {
     modules: [
       {
-        name: label,
+        name: displayName,
         code: name,
+        index: rootIndex,
         modules
       }
     ]
@@ -136,5 +148,6 @@ module.exports = {
   flattenCodes,
   asModulesTree,
   mergeAppPermissionTree,
-  topLevelCodes
+  topLevelCodes,
+  LINKED_APP_ROOT_INDEX
 };

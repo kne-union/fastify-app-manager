@@ -1,7 +1,8 @@
 const fp = require('fastify-plugin');
-const { KIND_LINKED, isLinked, linkedBaseUrl } = require('../utils/appKind');
+const { KIND_LINKED, isLinked, linkedBaseUrl, linkedApiBaseUrl } = require('../utils/appKind');
 const { mergeAppPermissionTree } = require('../utils/permissionSnapshot');
 const { createProxyAuditStore } = require('../utils/proxyAudit');
+const { SYSTEM_ENV_KEYS, DB_CONNECTION_KEYS, DB_DEDICATED_KEY } = require('../utils/env');
 
 const NAME_RE = /^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$/;
 
@@ -80,7 +81,7 @@ module.exports = fp(async (fastify, options) => {
   };
 
   const remoteFetch = async (app, { path: opsPath, method = 'GET', query, body, scope, auditAction, actor } = {}) => {
-    const baseUrl = linkedBaseUrl(app);
+    const baseUrl = linkedApiBaseUrl(app);
     if (!baseUrl) {
       httpError(400, '应用缺少 options.baseUrl');
     }
@@ -146,7 +147,9 @@ module.exports = fp(async (fastify, options) => {
 
   const applyPermissionSnapshot = async (app, remotePermissions) => {
     const previous = app.options?.permissionTree || null;
-    const tree = mergeAppPermissionTree(app.name, remotePermissions, previous);
+    const tree = mergeAppPermissionTree(app.name, remotePermissions, previous, {
+      label: app.label || app.name
+    });
     const nextOptions = Object.assign({}, app.options || {}, {
       permissionsSnapshot: remotePermissions,
       permissionTree: tree,
@@ -163,7 +166,20 @@ module.exports = fp(async (fastify, options) => {
   const assertNameAvailable = async name => {
     const exists = await models.app.findOne({ where: { name } });
     if (exists) {
-      httpError(409, `应用 ${name} 已存在`);
+      // 上次导入 redeem 成功但 activate 失败时可能残留 pending_activate 半成品，允许覆盖重试
+      const linkStatus = exists.options?.linkStatus;
+      if (isLinked(exists) && (linkStatus === 'pending_activate' || linkStatus === 'error')) {
+        if (typeof options.onAppRemoved === 'function') {
+          try {
+            await options.onAppRemoved({ app: exists.toJSON ? exists.toJSON() : exists });
+          } catch (cleanupErr) {
+            fastify.log.warn({ err: cleanupErr }, 'cleanup orphan linked OIDC failed');
+          }
+        }
+        await exists.destroy();
+      } else {
+        httpError(409, `应用 ${name} 已存在`);
+      }
     }
     if (typeof options.getPermissionRootCodes === 'function') {
       const roots = await options.getPermissionRootCodes();
@@ -203,8 +219,12 @@ module.exports = fp(async (fastify, options) => {
       httpError(400, 'installKey 已过期');
     }
     const baseUrl = String(key.baseUrl || '').replace(/\/+$/, '');
+    const apiBaseUrl = String(key.apiBaseUrl || key.baseUrl || '').replace(/\/+$/, '');
     if (!baseUrl) {
       httpError(400, 'installKey 缺少 baseUrl');
+    }
+    if (!apiBaseUrl) {
+      httpError(400, 'installKey 缺少 apiBaseUrl');
     }
     const name = overrideName || slugifyName(key.appName);
     if (!name || !NAME_RE.test(name)) {
@@ -213,7 +233,7 @@ module.exports = fp(async (fastify, options) => {
     await assertNameAvailable(name);
 
     const assertion = await signAssertion(baseUrl);
-    const redeemRes = await fetch(`${baseUrl}/app-ops/link/redeem`, {
+    const redeemRes = await fetch(`${apiBaseUrl}/app-ops/link/redeem`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -243,6 +263,7 @@ module.exports = fp(async (fastify, options) => {
       options: {
         kind: KIND_LINKED,
         baseUrl,
+        apiBaseUrl,
         linkStatus: 'pending_activate',
         permissionsSnapshot: manifest.permissions || [],
         capabilities: manifest.capabilities || {},
@@ -260,7 +281,7 @@ module.exports = fp(async (fastify, options) => {
     try {
       oidcInfo = await ensureOidc({ app, remoteBaseUrl: baseUrl });
       const activateAssertion = await signAssertion(baseUrl);
-      const activateRes = await fetch(`${baseUrl}/app-ops/link/activate`, {
+      const activateRes = await fetch(`${apiBaseUrl}/app-ops/link/activate`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
@@ -322,6 +343,25 @@ module.exports = fp(async (fastify, options) => {
       return null;
     }
     const baseUrl = linkedBaseUrl(app);
+    const apiBaseUrl = linkedApiBaseUrl(app);
+    // 运行状态只看 /ready：运维代理偶发失败不应把已配对应用打成「错误」
+    let readyOk = false;
+    let readyError = null;
+    try {
+      const ready = await fetch(`${apiBaseUrl}/ready`, { signal: AbortSignal.timeout(5000) });
+      const ct = String(ready.headers.get('content-type') || '');
+      // 前端 SPA 会对未知路径回 HTML 200，不能当成健康
+      readyOk = ready.ok && !ct.includes('text/html');
+      if (!readyOk) {
+        readyError = ready.ok ? '远程 /ready 返回了非 JSON（可能打到前端）' : `远程健康检查失败 HTTP ${ready.status}`;
+      }
+    } catch (e) {
+      readyOk = false;
+      readyError = e.message || '远程健康检查失败';
+    }
+
+    let syncError = null;
+    let remotePerms = app.options?.permissionsSnapshot || app.options?.permissionTree || [];
     try {
       await remoteFetch(app, {
         path: '/app-ops/link/status',
@@ -332,38 +372,42 @@ module.exports = fp(async (fastify, options) => {
         path: '/app-ops/permissions',
         scope: 'app-ops:permissions:read'
       });
-      let readyOk = false;
-      try {
-        const ready = await fetch(`${baseUrl}/ready`, { signal: AbortSignal.timeout(5000) });
-        readyOk = ready.ok;
-      } catch (e) {
-        readyOk = false;
-      }
-      await app.update({
-        status: readyOk ? 'running' : 'error',
-        message: readyOk ? null : '远程健康检查失败',
-        options: Object.assign({}, app.options || {}, {
-          linkStatus: 'paired'
-        })
-      });
-      await app.reload();
-      const remotePerms = perms?.permissions || perms || app.options?.permissionsSnapshot || [];
-      await applyPermissionSnapshot(app, remotePerms);
-      if (typeof options.ensureLinkedRegistration === 'function') {
-        await options.ensureLinkedRegistration({ app, remoteBaseUrl: baseUrl });
-      }
-      await app.reload();
-      return { name: app.name, ok: true, status: app.status };
+      remotePerms = perms?.permissions || perms || remotePerms;
     } catch (e) {
-      // 远程不可达：沿用已有 permissionTree / snapshot，不清空
-      await app
-        .update({
-          status: 'error',
-          message: e.message
-        })
-        .catch(() => {});
-      return { name: app.name, ok: false, error: e.message };
+      syncError = e;
+      fastify.log.warn({ err: e, app: app.name }, 'linked sync ops failed; keep snapshot');
     }
+
+    const now = new Date().toISOString();
+    await app.update({
+      status: readyOk ? 'running' : 'error',
+      message: readyOk ? (syncError ? `权限同步失败：${syncError.message}` : null) : readyError || syncError?.message || '远程健康检查失败',
+      options: Object.assign({}, app.options || {}, {
+        linkStatus: readyOk || app.options?.linkStatus === 'paired' ? 'paired' : app.options?.linkStatus || 'error',
+        lastHealthAt: now,
+        lastHealthOk: readyOk,
+        ...(syncError
+          ? {}
+          : {
+              permissionsSyncedAt: now
+            })
+      })
+    });
+    await app.reload();
+
+    if (!syncError) {
+      try {
+        await applyPermissionSnapshot(app, remotePerms);
+        if (typeof options.ensureLinkedRegistration === 'function') {
+          await options.ensureLinkedRegistration({ app, remoteBaseUrl: baseUrl });
+        }
+        await app.reload();
+      } catch (e) {
+        fastify.log.warn({ err: e, app: app.name }, 'linked apply snapshot failed');
+      }
+    }
+
+    return { name: app.name, ok: readyOk, status: app.status, syncError: syncError?.message || null };
   };
 
   const syncAllLinked = async () => {
@@ -379,7 +423,7 @@ module.exports = fp(async (fastify, options) => {
    * 透传远程 SSE（logs/stream）。会 hijack reply；超时加长以免掐断长连接。
    */
   const remoteStream = async (app, { path: opsPath, query, scope, reply, request, auditAction, actor } = {}) => {
-    const baseUrl = linkedBaseUrl(app);
+    const baseUrl = linkedApiBaseUrl(app);
     if (!baseUrl) {
       httpError(400, '应用缺少 options.baseUrl');
     }
@@ -482,9 +526,34 @@ module.exports = fp(async (fastify, options) => {
         auditAction: 'logs.stream',
         actor
       }),
-    env: app => remoteFetch(app, { path: '/app-ops/env', scope: 'app-ops:env:read' }),
+    env: async app => {
+      const remote = await remoteFetch(app, { path: '/app-ops/env', scope: 'app-ops:env:read' });
+      // 对齐托管应用 Env：只展示 schema 声明，并隐藏系统注入 / DB 连接等内部项
+      const injected = new Set(['PORT', ...SYSTEM_ENV_KEYS, ...DB_CONNECTION_KEYS, DB_DEDICATED_KEY, ...(remote?.injectedKeys || [])]);
+      const declared = (remote?.declared || []).filter(item => item && !injected.has(item.key));
+      return {
+        name: app.name,
+        versionId: 'linked',
+        version: null,
+        hasSchema: remote?.hasSchema !== false && declared.length > 0,
+        valid: true,
+        readOnly: true,
+        declared,
+        others: []
+      };
+    },
     permissions: app => remoteFetch(app, { path: '/app-ops/permissions', scope: 'app-ops:permissions:read' }),
-    dbTables: app => remoteFetch(app, { path: '/app-ops/db/tables', scope: 'app-ops:db:read' }),
+    dbTables: async app => {
+      const data = await remoteFetch(app, { path: '/app-ops/db/tables', scope: 'app-ops:db:read' });
+      // 兼容远程曾返回 name 的旧形，统一成 DataOps 使用的 table
+      if (data?.pageData) {
+        data.pageData = data.pageData.map(row => Object.assign({}, row, { table: row.table || row.name }));
+      }
+      return Object.assign({}, data, {
+        dbScope: data?.dbScope || 'remote',
+        readOnly: true
+      });
+    },
     dbRows: (app, query) => remoteFetch(app, { path: '/app-ops/db/rows', query, scope: 'app-ops:db:read' }),
     dbQuery: (app, body) => remoteFetch(app, { path: '/app-ops/db/query', method: 'POST', body, scope: 'app-ops:db:read' }),
     dbSaveRow: (app, body) => remoteFetch(app, { path: '/app-ops/db/row/save', method: 'POST', body, scope: 'app-ops:db:write' }),
@@ -492,6 +561,49 @@ module.exports = fp(async (fastify, options) => {
     migrationsList: app => remoteFetch(app, { path: '/app-ops/migrations/list', scope: 'app-ops:migrations:read' }),
     migrationsContent: (app, query) => remoteFetch(app, { path: '/app-ops/migrations/content', query, scope: 'app-ops:migrations:read' }),
     migrationsAction: (app, body) => remoteFetch(app, { path: '/app-ops/migrations/action', method: 'POST', body, scope: 'app-ops:migrations:execute' })
+  };
+
+  const looksLikeUserId = value => /^\d{10,}$/.test(String(value || ''));
+
+  /** 操作者展示：昵称 / 邮箱 / 手机，避免审计列表只剩雪花 id */
+  const formatActorLabel = user => {
+    if (!user) {
+      return null;
+    }
+    return user.nickname || user.email || user.phone || user.username || (user.id != null ? String(user.id) : null);
+  };
+
+  const listProxyAudit = async props => {
+    const result = await proxyAudit.list(props);
+    const ids = [
+      ...new Set(
+        (result.pageData || [])
+          .map(row => row.actor)
+          .filter(looksLikeUserId)
+          .map(String)
+      )
+    ];
+    const User = fastify.account?.models?.user;
+    if (!ids.length || !User) {
+      return result;
+    }
+    try {
+      const users = await User.findAll({
+        where: { id: ids },
+        attributes: ['id', 'nickname', 'email', 'phone']
+      });
+      const labelById = new Map(users.map(u => [String(u.id), formatActorLabel(u)]));
+      return {
+        ...result,
+        pageData: (result.pageData || []).map(row => {
+          const label = labelById.get(String(row.actor));
+          return label ? Object.assign({}, row, { actor: label, actorId: row.actor }) : row;
+        })
+      };
+    } catch (e) {
+      fastify.log.warn({ err: e }, 'link audit enrich actor failed');
+      return result;
+    }
   };
 
   Object.assign(fastify[options.name].services, {
@@ -503,7 +615,8 @@ module.exports = fp(async (fastify, options) => {
       proxy,
       remoteFetch,
       remoteStream,
-      listProxyAudit: proxyAudit.list,
+      listProxyAudit,
+      formatActorLabel,
       applyPermissionSnapshot
     }
   });

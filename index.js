@@ -194,6 +194,18 @@ module.exports = fp(
       ]
     });
 
+    // 插件装载完成后立刻补齐老库列（不依赖 onReady）；避免 listen 前/竞态请求打到缺 kind 的表
+    fastify.after(async () => {
+      try {
+        const { services } = fastify[options.name] || {};
+        if (services?.bootstrap?.ensureSchema) {
+          await services.bootstrap.ensureSchema();
+        }
+      } catch (e) {
+        fastify.log.warn({ err: e }, 'ensure app-manager schema failed (after)');
+      }
+    });
+
     fastify.addHook('onReady', async () => {
       const { services } = fastify[options.name];
       await services.bootstrap.onReady();

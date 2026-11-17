@@ -15,6 +15,12 @@ const linkedBaseUrl = appLike => {
   return url ? String(url).replace(/\/+$/, '') : null;
 };
 
+/** 宿主服务端调远程（app-ops / open-api / ready）用；本地 ORIGIN 为前端端口时可与 baseUrl 不同 */
+const linkedApiBaseUrl = appLike => {
+  const url = appLike?.options?.apiBaseUrl || appLike?.apiBaseUrl || linkedBaseUrl(appLike);
+  return url ? String(url).replace(/\/+$/, '') : null;
+};
+
 const assertNotLinked = (appLike, action) => {
   if (isLinked(appLike)) {
     const err = new Error(`外部关联应用不支持${action || '该操作'}`);
@@ -29,5 +35,6 @@ module.exports = {
   normalizeKind,
   isLinked,
   linkedBaseUrl,
+  linkedApiBaseUrl,
   assertNotLinked
 };
