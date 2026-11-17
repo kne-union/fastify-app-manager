@@ -944,7 +944,15 @@ module.exports = fp(async (fastify, options) => {
     },
     async (request, reply) => {
       const { name, stream } = request.query;
-      await services.app.detail({ name });
+      const app = await services.app.detail({ name });
+      if (app.kind === 'linked' || app.options?.kind === 'linked') {
+        return services.link.proxy.logStream(app, {
+          reply,
+          request,
+          stream: stream || 'out',
+          actor: request.userInfo?.id || request.user?.id || null
+        });
+      }
       const sse = createSseReply(reply, { heartbeatMs: options.sseHeartbeatMs });
       const hub = services.app.getLogHub();
 

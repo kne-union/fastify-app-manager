@@ -375,9 +375,113 @@ module.exports = fp(async (fastify, options) => {
     return results.filter(Boolean);
   };
 
+  /**
+   * 透传远程 SSE（logs/stream）。会 hijack reply；超时加长以免掐断长连接。
+   */
+  const remoteStream = async (app, { path: opsPath, query, scope, reply, request, auditAction, actor } = {}) => {
+    const baseUrl = linkedBaseUrl(app);
+    if (!baseUrl) {
+      httpError(400, '应用缺少 options.baseUrl');
+    }
+    const action = auditAction || opsPath.replace(/^\/app-ops\//, '').replace(/\//g, '.');
+    const token = await getOpsToken(app, scope);
+    const url = new URL(opsPath.replace(/^\//, ''), `${baseUrl}/`);
+    if (query && typeof query === 'object') {
+      for (const [k, v] of Object.entries(query)) {
+        if (v !== undefined && v !== null && v !== '') {
+          url.searchParams.set(k, String(v));
+        }
+      }
+    }
+    const abort = new AbortController();
+    const onClose = () => abort.abort();
+    request.raw.on('close', onClose);
+    let response;
+    try {
+      response = await fetch(url, {
+        method: 'GET',
+        headers: { authorization: `Bearer ${token}`, accept: 'text/event-stream' },
+        signal: abort.signal
+      });
+    } catch (e) {
+      request.raw.off('close', onClose);
+      await proxyAudit
+        .append({
+          appName: app.name,
+          action,
+          result: 'error',
+          statusCode: 502,
+          actor,
+          detail: e.message
+        })
+        .catch(() => {});
+      httpError(502, e.message || '远程 SSE 连接失败');
+    }
+    if (!response.ok) {
+      request.raw.off('close', onClose);
+      const text = await response.text().catch(() => '');
+      await proxyAudit
+        .append({
+          appName: app.name,
+          action,
+          result: 'error',
+          statusCode: response.status,
+          actor,
+          detail: text.slice(0, 200)
+        })
+        .catch(() => {});
+      httpError(response.status >= 400 && response.status < 600 ? response.status : 502, text || `远程 ${response.status}`);
+    }
+    await proxyAudit
+      .append({
+        appName: app.name,
+        action,
+        result: 'ok',
+        statusCode: 200,
+        actor
+      })
+      .catch(() => {});
+
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no'
+    });
+
+    const { Readable } = require('node:stream');
+    const { pipeline } = require('node:stream/promises');
+    try {
+      const nodeStream = Readable.fromWeb(response.body);
+      await pipeline(nodeStream, reply.raw);
+    } catch (e) {
+      if (!abort.signal.aborted) {
+        fastify.log.warn({ err: e, app: app.name }, 'linked logs stream proxy ended');
+      }
+    } finally {
+      request.raw.off('close', onClose);
+      try {
+        reply.raw.end();
+      } catch (e) {
+        /* ignore */
+      }
+    }
+  };
+
   const proxy = {
     logs: (app, query) => remoteFetch(app, { path: '/app-ops/logs', query, scope: 'app-ops:logs:read' }),
     logFiles: app => remoteFetch(app, { path: '/app-ops/logs/files', scope: 'app-ops:logs:read' }),
+    logStream: (app, { reply, request, stream, actor }) =>
+      remoteStream(app, {
+        path: '/app-ops/logs/stream',
+        query: stream ? { stream } : {},
+        scope: 'app-ops:logs:read',
+        reply,
+        request,
+        auditAction: 'logs.stream',
+        actor
+      }),
     env: app => remoteFetch(app, { path: '/app-ops/env', scope: 'app-ops:env:read' }),
     permissions: app => remoteFetch(app, { path: '/app-ops/permissions', scope: 'app-ops:permissions:read' }),
     dbTables: app => remoteFetch(app, { path: '/app-ops/db/tables', scope: 'app-ops:db:read' }),
@@ -398,6 +502,7 @@ module.exports = fp(async (fastify, options) => {
       decodeInstallKey,
       proxy,
       remoteFetch,
+      remoteStream,
       listProxyAudit: proxyAudit.list,
       applyPermissionSnapshot
     }
