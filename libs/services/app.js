@@ -1464,6 +1464,7 @@ module.exports = fp(async (fastify, options) => {
 
   const removeLogFiles = async ({ name, files = [] }) => {
     const app = await getByName(name);
+    assertNotLinked(app, '删除远程日志');
     const targets = [];
     for (const fileName of files) {
       if (isCurrentFileName(fileName)) {
