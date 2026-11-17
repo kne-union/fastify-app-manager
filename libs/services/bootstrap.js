@@ -42,7 +42,8 @@ module.exports = fp(async (fastify, options) => {
     const { models } = fastify[options.name];
     const targets = [
       [models.appVersion, ['fileId', 'migrationFiles', 'envSchema']],
-      [models.appOpenApiRecord, ['searchText']]
+      [models.appOpenApiRecord, ['searchText']],
+      [models.app, ['kind']]
     ];
     for (const [model, names] of targets) {
       const queryInterface = model.sequelize.getQueryInterface();
@@ -51,8 +52,28 @@ module.exports = fp(async (fastify, options) => {
       for (const name of names) {
         const attr = model.rawAttributes[name];
         if (!columns[attr.field]) {
-          await queryInterface.addColumn(table, attr.field, { type: attr.type, allowNull: true, comment: attr.comment });
+          await queryInterface.addColumn(table, attr.field, {
+            type: attr.type,
+            allowNull: attr.allowNull !== false,
+            defaultValue: attr.defaultValue,
+            comment: attr.comment
+          });
         }
+      }
+    }
+    // linked 应用不占本机端口/目录/PM2：将既有非空列改为可空（幂等）
+    const queryInterface = models.app.sequelize.getQueryInterface();
+    const table = models.app.getTableName();
+    const columns = await queryInterface.describeTable(table);
+    for (const name of ['port', 'rootPath', 'pm2Name']) {
+      const attr = models.app.rawAttributes[name];
+      const col = columns[attr.field];
+      if (col && col.allowNull === false) {
+        await queryInterface.changeColumn(table, attr.field, {
+          type: attr.type,
+          allowNull: true,
+          comment: attr.comment
+        });
       }
     }
   };
@@ -123,7 +144,24 @@ module.exports = fp(async (fastify, options) => {
       if (options.loadSampleIntervalMs > 0) {
         sampleLoad().catch(err => fastify.log.debug({ err }, 'load sampling failed'));
       }
+      const link = fastify[options.name].services.link;
+      if (link?.syncAllLinked) {
+        link.syncAllLinked().catch(err => fastify.log.warn({ err }, 'linked apps sync failed'));
+      }
     });
+
+    const linkSyncMs = options.linkSyncIntervalMs || 0;
+    if (linkSyncMs > 0) {
+      const linkTimer = setInterval(() => {
+        const link = fastify[options.name].services.link;
+        if (link?.syncAllLinked) {
+          link.syncAllLinked().catch(err => fastify.log.warn({ err }, 'linked apps sync failed'));
+        }
+      }, linkSyncMs);
+      linkTimer.unref?.();
+      // 挂到实例上，onClose 时可清理；无专门字段时依赖进程退出
+      fastify[options.name]._linkSyncTimer = linkTimer;
+    }
   };
 
   const fsEnsureAppsRoot = async () => {
@@ -188,9 +226,13 @@ module.exports = fp(async (fastify, options) => {
    */
   const migratePm2Names = async () => {
     const { models } = fastify[options.name];
+    const { isLinked } = require('../utils/appKind');
     const apps = await models.app.findAll();
     const migrated = [];
     for (const app of apps) {
+      if (isLinked(app) || !app.pm2Name || !app.rootPath) {
+        continue;
+      }
       const pm2Name = createPm2Name(options.hostName, app.name);
       if (app.pm2Name === pm2Name) {
         continue;
@@ -236,9 +278,13 @@ module.exports = fp(async (fastify, options) => {
 
   const runRotation = async ({ now = new Date() } = {}) => {
     const { models } = fastify[options.name];
-    const apps = await models.app.findAll({ attributes: ['name', 'rootPath'] });
+    const { isLinked } = require('../utils/appKind');
+    const apps = await models.app.findAll({ attributes: ['name', 'rootPath', 'kind', 'options'] });
     const targets = [];
     for (const app of apps) {
+      if (isLinked(app) || !app.rootPath) {
+        continue;
+      }
       const logsDir = path.join(app.rootPath, 'logs');
       if (await fs.pathExists(logsDir)) {
         targets.push({ name: app.name, logsDir });
@@ -314,16 +360,18 @@ module.exports = fp(async (fastify, options) => {
     }
     const { models } = fastify[options.name];
     const summary = summarizeProcesses(await pm2Util.list(), { now: now.getTime() });
-    const apps = await models.app.findAll({ attributes: ['name', 'pm2Name'] });
+    const { isLinked } = require('../utils/appKind');
+    const apps = await models.app.findAll({ attributes: ['name', 'pm2Name', 'kind', 'options'] });
+    const managed = apps.filter(app => !isLinked(app) && app.pm2Name);
     const base = { ts: now.getTime(), sampledAt: toIsoInTz(now, options.logTimezone) };
-    const samples = apps.map(app => {
+    const samples = managed.map(app => {
       const sample = Object.assign({ name: app.name }, base, summary.get(app.pm2Name) || OFFLINE_LOAD, {
         requests: requestMetrics.snapshot(app.name, { now: base.ts })
       });
       loadStore.push(app.name, sample);
       return sample;
     });
-    const names = apps.map(app => app.name);
+    const names = managed.map(app => app.name);
     loadStore.retain(names);
     requestMetrics.retain(names);
     return samples;

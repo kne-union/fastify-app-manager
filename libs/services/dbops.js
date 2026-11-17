@@ -24,6 +24,8 @@ module.exports = fp(async (fastify, options) => {
     throw err;
   };
 
+  const { isLinked } = require('../utils/appKind');
+
   const getByName = async name => {
     const app = await models.app.findOne({ where: { name } });
     if (!app) {
@@ -31,6 +33,8 @@ module.exports = fp(async (fastify, options) => {
     }
     return app;
   };
+
+  const linkedProxy = () => fastify[options.name].services.link.proxy;
 
   const resolveEnvForApp = app =>
     resolveAppDbEnv({
@@ -116,6 +120,9 @@ module.exports = fp(async (fastify, options) => {
 
   const listTables = async ({ name, scope } = {}) => {
     const app = await getByName(name);
+    if (isLinked(app)) {
+      return linkedProxy().dbTables(app);
+    }
     return withSequelize(app, async (sequelize, env) => {
       const all = await listAllTables(sequelize);
       const dbScope = resolveDbScope(app.env || {}, app.options || {});
@@ -288,6 +295,9 @@ module.exports = fp(async (fastify, options) => {
 
   const listRows = async ({ name, table, currentPage = 1, perPage = 20, filter, includeDeleted, sort, keyword } = {}) => {
     const app = await getByName(name);
+    if (isLinked(app)) {
+      return linkedProxy().dbRows(app, { table, currentPage, perPage, filter, includeDeleted, sort, keyword });
+    }
     const showDeleted = includeDeleted === true || includeDeleted === 'true' || includeDeleted === 1;
     return withSequelize(app, async sequelize => {
       const all = await listAllTables(sequelize);
@@ -368,6 +378,9 @@ module.exports = fp(async (fastify, options) => {
 
   const saveRow = async ({ name, table, data = {}, autoGenerate } = {}) => {
     const app = await getByName(name);
+    if (isLinked(app)) {
+      return linkedProxy().dbSaveRow(app, { table, data, autoGenerate });
+    }
     return withSequelize(app, async sequelize => {
       const all = await listAllTables(sequelize);
       assertTableOwned(app, all, table);
@@ -457,6 +470,9 @@ module.exports = fp(async (fastify, options) => {
 
   const removeRow = async ({ name, table, id, pk, hard = false } = {}) => {
     const app = await getByName(name);
+    if (isLinked(app)) {
+      return linkedProxy().dbRemoveRow(app, { table, id, pk, hard });
+    }
     return withSequelize(app, async sequelize => {
       const all = await listAllTables(sequelize);
       assertTableOwned(app, all, table);
@@ -508,6 +524,9 @@ module.exports = fp(async (fastify, options) => {
 
   const runQuery = async ({ name, sql, replacements = {}, maxRows } = {}) => {
     const app = await getByName(name);
+    if (isLinked(app)) {
+      return linkedProxy().dbQuery(app, { sql, replacements, maxRows });
+    }
     const limit = Math.min(Math.max(1, Number(maxRows) || options.dbQueryMaxRows || 500), options.dbQueryMaxRows || 500);
     const checked = assertReadOnlyQuerySql(sql);
     return withSequelize(app, async sequelize => {

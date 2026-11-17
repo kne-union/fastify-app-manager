@@ -2,6 +2,9 @@
  * 应用中心子应用 OIDC 接入（可选）：宿主已注册 @kne/fastify-oidc 作为主 IdP 时使用。
  * 子应用 server 依赖 @kne/fastify-oidc 时，部署时登记资源服务与 client，并以 central 模式启动；
  * 子应用在 server/env.schema.json 中声明 AUTH_MODE 默认值为 standalone 时，保持自己的登录。
+ *
+ * 外部关联（linked）时把返回值一并传给 app-manager：
+ *   origin, signPlatformAssertion, ensureLinkedRegistration, getOpsServiceToken: getServiceToken
  */
 const path = require('node:path');
 const fs = require('fs-extra');
@@ -12,6 +15,16 @@ const OIDC_PACKAGE = '@kne/fastify-oidc';
 // 子应用 @kne/fastify-app-runtime 的 /open-api.json 放行带此 scope 的 client 令牌
 const OPEN_API_SCOPE = 'open-api:read';
 const DOCS_CLIENT_ID = 'app-center-docs';
+/** linked 远程 App Ops 所需 scope（写类默认可登记到 resource，实际授权由 capabilities 控制） */
+const APP_OPS_SCOPES = [
+  'app-ops:permissions:read',
+  'app-ops:logs:read',
+  'app-ops:env:read',
+  'app-ops:db:read',
+  'app-ops:db:write',
+  'app-ops:migrations:read',
+  'app-ops:migrations:execute'
+];
 
 const SYSTEM_ENV_KEYS = ['AUTH_MODE', 'OIDC_ISSUER', 'OIDC_AUDIENCE', 'OIDC_CLIENT_ID', 'OIDC_SERVICE_CLIENT_ID', 'OIDC_SERVICE_CLIENT_SECRET'];
 
@@ -75,18 +88,25 @@ const createAppOidc = (fastify, { origin, issuer, serviceAudience, pathPrefix = 
     backchannel_logout_session_required: true
   });
 
-  const ensureResourceServer = async ({ identifier, name }) => {
+  const ensureResourceServer = async ({ identifier, name, extraScopes = [] }) => {
     const { models, services, options } = oidc();
+    const required = [OPEN_API_SCOPE, ...extraScopes].filter(Boolean);
     const existing = await models.resourceServer.findOne({ where: { identifier } });
     if (!existing) {
-      await services.resourceServer.create({ identifier, name, scope: `${options.defaultResourceScope} ${OPEN_API_SCOPE}`, description: '应用中心子应用自动登记' });
+      await services.resourceServer.create({
+        identifier,
+        name,
+        scope: `${options.defaultResourceScope} ${required.join(' ')}`,
+        description: '应用中心子应用自动登记'
+      });
       return;
     }
     const scopes = String(existing.scope || options.defaultResourceScope)
       .split(' ')
       .filter(Boolean);
-    if (!scopes.includes(OPEN_API_SCOPE)) {
-      await existing.update({ scope: [...scopes, OPEN_API_SCOPE].join(' ') });
+    const missing = required.filter(scope => !scopes.includes(scope));
+    if (missing.length) {
+      await existing.update({ scope: [...scopes, ...missing].join(' ') });
     }
   };
 
@@ -250,33 +270,122 @@ const createAppOidc = (fastify, { origin, issuer, serviceAudience, pathPrefix = 
   };
 
   const onAppRemoved = async ({ app }) => {
-    if (!app.env?.OIDC_CLIENT_ID) {
+    const clientId = app.env?.OIDC_CLIENT_ID || app.options?.oidc?.clientId;
+    const serviceClientId = app.env?.OIDC_SERVICE_CLIENT_ID || app.options?.oidc?.serviceClientId;
+    const audience = app.env?.OIDC_AUDIENCE || app.options?.oidc?.audience;
+    if (!clientId && !serviceClientId && !audience) {
       return;
     }
     const { models, services } = oidc();
     await oidc().whenReady();
-    for (const clientId of [app.env.OIDC_CLIENT_ID, app.env.OIDC_SERVICE_CLIENT_ID].filter(Boolean)) {
-      const item = await models.client.findOne({ where: { clientId } });
+    for (const id of [clientId, serviceClientId].filter(Boolean)) {
+      const item = await models.client.findOne({ where: { clientId: id } });
       if (item) {
         await services.client.remove({ id: item.id });
       }
     }
-    if (app.env.OIDC_AUDIENCE) {
+    if (audience) {
       const docsClient = await models.client.findOne({ where: { clientId: DOCS_CLIENT_ID } });
-      if (docsClient && (docsClient.allowedResources || []).includes(app.env.OIDC_AUDIENCE)) {
-        await services.client.save({ id: docsClient.id, allowedResources: docsClient.allowedResources.filter(item => item !== app.env.OIDC_AUDIENCE) });
+      if (docsClient && (docsClient.allowedResources || []).includes(audience)) {
+        await services.client.save({ id: docsClient.id, allowedResources: docsClient.allowedResources.filter(item => item !== audience) });
       }
-      const item = await models.resourceServer.findOne({ where: { identifier: app.env.OIDC_AUDIENCE } });
+      const item = await models.resourceServer.findOne({ where: { identifier: audience } });
       if (item) {
         await services.resourceServer.remove({ id: item.id });
       }
     }
   };
 
-  return { systemEnvKeys: SYSTEM_ENV_KEYS, resolveSystemEnv, onAppRemoved, getOpenApiToken, issueUserAccessToken };
+  /**
+   * linked 应用：audience 仍用本平台 /app/{name}/api；SPA 回调与 backchannel 指向远程 baseUrl。
+   */
+  const ensureLinkedRegistration = async ({ app, remoteBaseUrl }) => {
+    if (!remoteBaseUrl) {
+      throw new Error('ensureLinkedRegistration 需要 remoteBaseUrl');
+    }
+    await oidc().whenReady();
+    const base = String(remoteBaseUrl).replace(/\/+$/, '');
+    const urls = resolveUrls(app);
+    const ids = clientIds(app.name);
+    await ensureResourceServer({
+      identifier: urls.audience,
+      name: app.label || app.name,
+      extraScopes: APP_OPS_SCOPES
+    });
+    await ensureSpaClient({
+      clientId: ids.spa,
+      clientName: app.label || app.name,
+      metadata: spaMetadata({ bases: [base] }, base),
+      allowedResources: [urls.audience]
+    });
+    const serviceClientSecret = await ensureServiceClient({
+      clientId: ids.service,
+      clientName: `${app.label || app.name} 服务端`
+    });
+    await ensureDocsClient(urls.audience);
+    return {
+      issuer,
+      audience: urls.audience,
+      clientId: ids.spa,
+      serviceClientId: ids.service,
+      serviceClientSecret
+    };
+  };
+
+  /** 签发带指定 scope 的服务令牌（linked App Ops 代理用） */
+  const getServiceToken = async ({ app, scope }) => {
+    const audience = app.env?.OIDC_AUDIENCE || app.options?.oidc?.audience || resolveUrls(app).audience;
+    const clientId = app.env?.OIDC_SERVICE_CLIENT_ID || app.options?.oidc?.serviceClientId || clientIds(app.name).service;
+    let clientSecret = app.options?.oidc?.serviceClientSecret;
+    if (!clientSecret) {
+      clientSecret = await ensureServiceClient({ clientId, clientName: `${app.label || app.name} 服务端` });
+    }
+    await ensureResourceServer({ identifier: audience, name: app.label || app.name, extraScopes: APP_OPS_SCOPES });
+    const response = await fastify.inject({
+      method: 'POST',
+      url: `${new URL(issuer).pathname}/token`,
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        authorization: `Basic ${Buffer.from(`${encodeURIComponent(clientId)}:${encodeURIComponent(clientSecret)}`).toString('base64')}`
+      },
+      payload: new URLSearchParams({
+        grant_type: 'client_credentials',
+        resource: audience,
+        scope: scope || APP_OPS_SCOPES.concat(OPEN_API_SCOPE).join(' ')
+      }).toString()
+    });
+    const data = response.json();
+    if (response.statusCode !== 200) {
+      throw new Error(`签发运维服务令牌失败：${data.error_description || data.error || response.statusCode}`);
+    }
+    return data.access_token;
+  };
+
+  const signPlatformAssertion = async ({ audience }) => {
+    const signer = oidc().platformAssertion;
+    if (!signer?.sign) {
+      throw new Error('IdP 未就绪，无法签发平台断言');
+    }
+    return signer.sign({ audience });
+  };
+
+  return {
+    systemEnvKeys: SYSTEM_ENV_KEYS,
+    resolveSystemEnv,
+    onAppRemoved,
+    getOpenApiToken,
+    issueUserAccessToken,
+    ensureLinkedRegistration,
+    getServiceToken,
+    signPlatformAssertion,
+    resolveUrls,
+    APP_OPS_SCOPES
+  };
 };
 
 module.exports = createAppOidc;
 module.exports.supportsOidc = supportsOidc;
 module.exports.prefersStandalone = prefersStandalone;
 module.exports.SYSTEM_ENV_KEYS = SYSTEM_ENV_KEYS;
+module.exports.APP_OPS_SCOPES = APP_OPS_SCOPES;
+module.exports.OPEN_API_SCOPE = OPEN_API_SCOPE;
