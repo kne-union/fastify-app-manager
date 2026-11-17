@@ -1,5 +1,7 @@
 const fp = require('fastify-plugin');
 const { KIND_LINKED, isLinked, linkedBaseUrl } = require('../utils/appKind');
+const { mergeAppPermissionTree } = require('../utils/permissionSnapshot');
+const { createProxyAuditStore } = require('../utils/proxyAudit');
 
 const NAME_RE = /^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$/;
 
@@ -33,6 +35,7 @@ const unwrapEnvelope = async response => {
 
 module.exports = fp(async (fastify, options) => {
   const { models } = fastify[options.name];
+  const proxyAudit = createProxyAuditStore({ appsRoot: options.appsRoot });
 
   const httpError = (statusCode, message) => {
     if (fastify.httpErrors) {
@@ -76,32 +79,99 @@ module.exports = fp(async (fastify, options) => {
     httpError(400, '未配置 getOpsServiceToken，无法代理远程运维接口');
   };
 
-  const remoteFetch = async (app, { path: opsPath, method = 'GET', query, body, scope }) => {
+  const remoteFetch = async (app, { path: opsPath, method = 'GET', query, body, scope, auditAction, actor } = {}) => {
     const baseUrl = linkedBaseUrl(app);
     if (!baseUrl) {
       httpError(400, '应用缺少 options.baseUrl');
     }
-    const token = await getOpsToken(app, scope);
-    const url = new URL(opsPath.replace(/^\//, ''), `${baseUrl}/`);
-    if (query && typeof query === 'object') {
-      for (const [k, v] of Object.entries(query)) {
-        if (v !== undefined && v !== null && v !== '') {
-          url.searchParams.set(k, String(v));
+    const action = auditAction || opsPath.replace(/^\/app-ops\//, '').replace(/\//g, '.');
+    try {
+      const token = await getOpsToken(app, scope);
+      const url = new URL(opsPath.replace(/^\//, ''), `${baseUrl}/`);
+      if (query && typeof query === 'object') {
+        for (const [k, v] of Object.entries(query)) {
+          if (v !== undefined && v !== null && v !== '') {
+            url.searchParams.set(k, String(v));
+          }
         }
       }
+      const response = await fetch(url, {
+        method,
+        headers: Object.assign({ authorization: `Bearer ${token}` }, body ? { 'content-type': 'application/json' } : {}),
+        body: body ? JSON.stringify(body) : undefined,
+        signal: AbortSignal.timeout(options.linkProxyTimeoutMs || 15000)
+      });
+      const { ok, status, data, raw } = await unwrapEnvelope(response);
+      if (!ok) {
+        const message = data?.message || raw?.message || raw?.data?.message || `远程 ${status}`;
+        await proxyAudit
+          .append({
+            appName: app.name,
+            action,
+            result: 'error',
+            statusCode: status,
+            actor,
+            detail: message
+          })
+          .catch(() => {});
+        httpError(status >= 400 && status < 600 ? status : 502, message);
+      }
+      await proxyAudit
+        .append({
+          appName: app.name,
+          action,
+          result: 'ok',
+          statusCode: 200,
+          actor,
+          detail: body?.file || query?.file || null
+        })
+        .catch(() => {});
+      return data;
+    } catch (e) {
+      if (!e.statusCode) {
+        await proxyAudit
+          .append({
+            appName: app.name,
+            action,
+            result: 'error',
+            statusCode: 502,
+            actor,
+            detail: e.message
+          })
+          .catch(() => {});
+      }
+      throw e;
     }
-    const response = await fetch(url, {
-      method,
-      headers: Object.assign({ authorization: `Bearer ${token}` }, body ? { 'content-type': 'application/json' } : {}),
-      body: body ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(options.linkProxyTimeoutMs || 15000)
+  };
+
+  const applyPermissionSnapshot = async (app, remotePermissions) => {
+    const previous = app.options?.permissionTree || null;
+    const tree = mergeAppPermissionTree(app.name, remotePermissions, previous);
+    const nextOptions = Object.assign({}, app.options || {}, {
+      permissionsSnapshot: remotePermissions,
+      permissionTree: tree,
+      permissionsSyncedAt: new Date().toISOString()
     });
-    const { ok, status, data, raw } = await unwrapEnvelope(response);
-    if (!ok) {
-      const message = data?.message || raw?.message || raw?.data?.message || `远程 ${status}`;
-      httpError(status >= 400 && status < 600 ? status : 502, message);
+    await app.update({ options: nextOptions });
+    await app.reload();
+    if (typeof options.onPermissionsSynced === 'function') {
+      await options.onPermissionsSynced({ app, tree, sourceKey: `app:${app.name}` });
     }
-    return data;
+    return tree;
+  };
+
+  const assertNameAvailable = async name => {
+    const exists = await models.app.findOne({ where: { name } });
+    if (exists) {
+      httpError(409, `应用 ${name} 已存在`);
+    }
+    if (typeof options.getPermissionRootCodes === 'function') {
+      const roots = await options.getPermissionRootCodes();
+      const set = new Set((roots || []).map(String));
+      if (set.has(name)) {
+        httpError(409, `应用 name ${name} 与本平台权限顶层码冲突，请远程改名后重试`);
+      }
+    }
   };
 
   const slugifyName = raw => {
@@ -140,10 +210,7 @@ module.exports = fp(async (fastify, options) => {
     if (!name || !NAME_RE.test(name)) {
       httpError(400, '应用 name 无效：请传合法 slug 或远程改名');
     }
-    const exists = await models.app.findOne({ where: { name } });
-    if (exists) {
-      httpError(409, `应用 ${name} 已存在`);
-    }
+    await assertNameAvailable(name);
 
     const assertion = await signAssertion(baseUrl);
     const redeemRes = await fetch(`${baseUrl}/app-ops/link/redeem`, {
@@ -220,12 +287,12 @@ module.exports = fp(async (fastify, options) => {
             clientId: oidcInfo.clientId,
             serviceClientId: oidcInfo.serviceClientId,
             serviceClientSecret: oidcInfo.serviceClientSecret
-          },
-          permissionsSyncedAt: new Date().toISOString()
+          }
         }),
         message: null
       });
       await app.reload();
+      await applyPermissionSnapshot(app, manifest.permissions || []);
     } catch (e) {
       if (typeof options.onAppRemoved === 'function' && oidcInfo) {
         try {
@@ -276,17 +343,19 @@ module.exports = fp(async (fastify, options) => {
         status: readyOk ? 'running' : 'error',
         message: readyOk ? null : '远程健康检查失败',
         options: Object.assign({}, app.options || {}, {
-          permissionsSnapshot: perms?.permissions || perms || app.options?.permissionsSnapshot || [],
-          permissionsSyncedAt: new Date().toISOString(),
           linkStatus: 'paired'
         })
       });
+      await app.reload();
+      const remotePerms = perms?.permissions || perms || app.options?.permissionsSnapshot || [];
+      await applyPermissionSnapshot(app, remotePerms);
       if (typeof options.ensureLinkedRegistration === 'function') {
         await options.ensureLinkedRegistration({ app, remoteBaseUrl: baseUrl });
       }
       await app.reload();
       return { name: app.name, ok: true, status: app.status };
     } catch (e) {
+      // 远程不可达：沿用已有 permissionTree / snapshot，不清空
       await app
         .update({
           status: 'error',
@@ -328,7 +397,9 @@ module.exports = fp(async (fastify, options) => {
       syncAllLinked,
       decodeInstallKey,
       proxy,
-      remoteFetch
+      remoteFetch,
+      listProxyAudit: proxyAudit.list,
+      applyPermissionSnapshot
     }
   });
 });

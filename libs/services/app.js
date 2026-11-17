@@ -1396,6 +1396,13 @@ module.exports = fp(async (fastify, options) => {
         fastify.log.warn({ err: e, appName: name }, 'onAppRemoved hook failed');
       }
     }
+    if (linked && typeof options.onPermissionsRemoved === 'function') {
+      try {
+        await options.onPermissionsRemoved({ app: snapshot, sourceKey: `app:${name}` });
+      } catch (e) {
+        fastify.log.warn({ err: e, appName: name }, 'onPermissionsRemoved hook failed');
+      }
+    }
     return {
       removed: true,
       export: exportResult,

@@ -65,4 +65,39 @@ module.exports = fp(async (fastify, options) => {
       return services.link.syncOne(row);
     }
   );
+
+  fastify.get(
+    `${options.prefix}/app/:name/link/audit`,
+    {
+      onRequest: auth(),
+      schema: {
+        tags: [TAG_APP],
+        summary: '外部关联应用代理审计',
+        description: '主平台侧记录：谁通过平台代理打了远程 /app-ops',
+        params: {
+          type: 'object',
+          required: ['name'],
+          properties: { name: { type: 'string', description: '应用 name' } }
+        },
+        querystring: {
+          type: 'object',
+          properties: {
+            action: { type: 'string', description: '按动作筛选' },
+            limit: { type: 'number', description: '条数，默认 50' },
+            offset: { type: 'number', description: '偏移' }
+          }
+        },
+        response: success('审计列表', any())
+      }
+    },
+    async request => {
+      await services.app.detail({ name: request.params.name });
+      return services.link.listProxyAudit({
+        appName: request.params.name,
+        action: request.query?.action,
+        limit: request.query?.limit,
+        offset: request.query?.offset
+      });
+    }
+  );
 });

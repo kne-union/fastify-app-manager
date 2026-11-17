@@ -10,7 +10,7 @@ module.exports = fp(async (fastify, options) => {
 
   const versionProps = {
     name: { type: 'string', description: '应用 name' },
-    versionId: { type: 'string', description: '版本 ID' }
+    versionId: { type: 'string', description: '版本 ID；linked 外部应用可不传，代理远程 server/sql' }
   };
 
   fastify.get(
@@ -20,10 +20,10 @@ module.exports = fp(async (fastify, options) => {
       schema: {
         tags: [TAG],
         summary: '版本迁移脚本列表（含执行状态）',
-        description: '脚本内容以数据库为准；执行状态读自应用数据库的迁移记录表，读取失败时 executed 为 null 并返回 dbError',
+        description: '脚本内容以数据库为准；执行状态读自应用数据库的迁移记录表，读取失败时 executed 为 null 并返回 dbError；linked 应用不传 versionId，代理远程 /app-ops/migrations',
         query: {
           type: 'object',
-          required: ['name', 'versionId'],
+          required: ['name'],
           properties: versionProps
         },
         response: success(
@@ -61,7 +61,7 @@ module.exports = fp(async (fastify, options) => {
         summary: '读取迁移脚本内容',
         query: {
           type: 'object',
-          required: ['name', 'versionId', 'file'],
+          required: ['name', 'file'],
           properties: Object.assign({}, versionProps, { file: { type: 'string', description: SQL_FILE } })
         },
         response: success('脚本内容', obj('脚本内容', { name: str('文件名'), content: str('SQL 内容') }))
@@ -120,10 +120,10 @@ module.exports = fp(async (fastify, options) => {
         description: 'execute 在应用数据库执行脚本并记录，mark 只记录为已执行，unmark 删除执行记录（不回滚已执行的 SQL）',
         body: {
           type: 'object',
-          required: ['name', 'versionId', 'file', 'action'],
+          required: ['name', 'file', 'action'],
           properties: Object.assign({}, versionProps, {
             file: { type: 'string', description: SQL_FILE },
-            action: { type: 'string', enum: ['execute', 'mark', 'unmark'], description: '操作：execute 执行，mark 标记已执行，unmark 撤销执行记录' }
+            action: { type: 'string', enum: ['execute', 'mark', 'unmark'], description: '操作：execute 执行，mark 标记已执行，unmark 撤销执行记录；linked 应用不传 versionId' }
           })
         },
         response: success('操作结果', migrationResult)
