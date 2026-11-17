@@ -15,7 +15,7 @@ module.exports = fp(async (fastify, options) => {
     throw err;
   };
 
-  const { isLinked, linkedBaseUrl } = require('../utils/appKind');
+  const { isLinked, linkedApiBaseUrl } = require('../utils/appKind');
 
   const getRunningApp = async (name, hook) => {
     if (typeof options[hook] !== 'function') {
@@ -30,7 +30,7 @@ module.exports = fp(async (fastify, options) => {
 
   const openApiUrl = app => {
     if (isLinked(app)) {
-      const base = linkedBaseUrl(app);
+      const base = linkedApiBaseUrl(app);
       if (!base) {
         httpError(400, `应用 ${app.name} 缺少 options.baseUrl`);
       }
@@ -43,11 +43,16 @@ module.exports = fp(async (fastify, options) => {
   const getDocument = async ({ name }) => {
     const app = await getRunningApp(name, 'getOpenApiToken');
     const token = await options.getOpenApiToken(app);
-    const response = await fetch(openApiUrl(app), {
+    const docUrl = openApiUrl(app);
+    const response = await fetch(docUrl, {
       headers: { authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(15000)
     });
-    const isJson = String(response.headers.get('content-type') || '').includes('application/json');
+    const contentType = String(response.headers.get('content-type') || '');
+    const isJson = contentType.includes('application/json');
+    if (response.ok && contentType.includes('text/html')) {
+      httpError(400, `应用 ${name} 的 ${docUrl} 返回了前端页面而非 OpenAPI：请配置 options.apiBaseUrl 指向 API 端口，或让前端把 /open-api.json 代理到后端`);
+    }
     if (response.status === 404 || (response.ok && !isJson)) {
       httpError(400, `应用 ${name} 未开启 /open-api.json：需 @kne/fastify-app-runtime >=0.1.1、server 最前面注册 @fastify/swagger 且注册了 account 模块`);
     }

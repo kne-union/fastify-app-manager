@@ -67,6 +67,7 @@ const appBodyProps = {
   category: { type: ['object', 'string', 'null'], description: '应用分类：分组记录（只保留 code、name）或分类编码；null 清空' },
   isPublic: { type: 'boolean', description: '是否公开，公开的应用未登录也能在应用中心看到；不传视为公开' },
   entries: entriesSchema,
+  homePath: { type: 'string', description: '应用首页路径（相对应用根，默认 /）；也可填完整 http(s) URL，详情「主页」Tab 用 iframe 打开' },
   env: { type: 'object', description: '应用环境变量；值为 ******** 的密钥变量保持原值，PORT 与宿主维护的系统变量会被忽略' },
   pm2Config: { type: 'object', description: 'PM2 覆盖配置，与插件级 pm2Defaults 合并' },
   options: { type: 'object', description: '扩展配置（如 secretEnvKeys 指定按密钥处理的变量名）' }
@@ -946,11 +947,12 @@ module.exports = fp(async (fastify, options) => {
       const { name, stream } = request.query;
       const app = await services.app.detail({ name });
       if (app.kind === 'linked' || app.options?.kind === 'linked') {
+        const user = request.userInfo || request.user;
         return services.link.proxy.logStream(app, {
           reply,
           request,
           stream: stream || 'out',
-          actor: request.userInfo?.id || request.user?.id || null
+          actor: services.link.formatActorLabel?.(user) || user?.nickname || user?.email || user?.id || null
         });
       }
       const sse = createSseReply(reply, { heartbeatMs: options.sseHeartbeatMs });

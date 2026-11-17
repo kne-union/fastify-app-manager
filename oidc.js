@@ -123,8 +123,13 @@ const createAppOidc = (fastify, { origin, issuer, serviceAudience, pathPrefix = 
     }
   };
 
-  const ensureServiceClient = async ({ clientId, clientName }) => {
+  /**
+   * 子应用服务 client：始终可访问宿主 serviceAudience；
+   * 另可合并应用自身 audience（linked 运维代理 / central 调本应用 API 需要）。
+   */
+  const ensureServiceClient = async ({ clientId, clientName, allowedResources: extraResources = [] } = {}) => {
     const { models, services, options } = oidc();
+    const resources = Array.from(new Set([serviceAudience, ...[].concat(extraResources || [])].filter(Boolean)));
     const existing = await models.client.findOne({ where: { clientId } });
     if (!existing) {
       const clientSecret = oidcCrypto().randomSecret(32);
@@ -133,10 +138,15 @@ const createAppOidc = (fastify, { origin, issuer, serviceAudience, pathPrefix = 
         clientName,
         clientSecret,
         metadata: { grant_types: ['client_credentials'], response_types: [], token_endpoint_auth_method: 'client_secret_basic' },
-        allowedResources: [serviceAudience],
+        allowedResources: resources,
         description: '应用中心子应用自动登记'
       });
       return clientSecret;
+    }
+    const current = existing.allowedResources || [];
+    const missing = resources.filter(item => !current.includes(item));
+    if (missing.length) {
+      await services.client.save({ id: existing.id, allowedResources: [...current, ...missing] });
     }
     // 以认证管理中的实际 secret 为准（管理员可能重置过）
     return oidcCrypto().decrypt(options.keyEncryptionSecret, existing.clientSecret);
@@ -254,7 +264,11 @@ const createAppOidc = (fastify, { origin, issuer, serviceAudience, pathPrefix = 
       metadata: spaMetadata(urls, upstreamUrl),
       allowedResources: [urls.audience]
     });
-    const serviceSecret = await ensureServiceClient({ clientId: ids.service, clientName: `${app.label || app.name} 服务端` });
+    const serviceSecret = await ensureServiceClient({
+      clientId: ids.service,
+      clientName: `${app.label || app.name} 服务端`,
+      allowedResources: [urls.audience]
+    });
 
     return Object.assign(
       {
@@ -320,7 +334,8 @@ const createAppOidc = (fastify, { origin, issuer, serviceAudience, pathPrefix = 
     });
     const serviceClientSecret = await ensureServiceClient({
       clientId: ids.service,
-      clientName: `${app.label || app.name} 服务端`
+      clientName: `${app.label || app.name} 服务端`,
+      allowedResources: [urls.audience]
     });
     await ensureDocsClient(urls.audience);
     return {
@@ -336,10 +351,13 @@ const createAppOidc = (fastify, { origin, issuer, serviceAudience, pathPrefix = 
   const getServiceToken = async ({ app, scope }) => {
     const audience = app.env?.OIDC_AUDIENCE || app.options?.oidc?.audience || resolveUrls(app).audience;
     const clientId = app.env?.OIDC_SERVICE_CLIENT_ID || app.options?.oidc?.serviceClientId || clientIds(app.name).service;
-    let clientSecret = app.options?.oidc?.serviceClientSecret;
-    if (!clientSecret) {
-      clientSecret = await ensureServiceClient({ clientId, clientName: `${app.label || app.name} 服务端` });
-    }
+    // 即使已有 secret，也要确保 allowedResources 含应用 audience（旧数据可能只有宿主 serviceAudience）
+    const clientSecret =
+      (await ensureServiceClient({
+        clientId,
+        clientName: `${app.label || app.name} 服务端`,
+        allowedResources: [audience]
+      })) || app.options?.oidc?.serviceClientSecret;
     await ensureResourceServer({ identifier: audience, name: app.label || app.name, extraScopes: APP_OPS_SCOPES });
     const response = await fastify.inject({
       method: 'POST',

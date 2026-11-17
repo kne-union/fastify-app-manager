@@ -517,4 +517,22 @@ describe('system env hooks', function () {
     await fastify.appManager.services.bootstrap.ensureSchema();
     expect(await queryInterface.describeTable(model.getTableName())).to.have.property('file_id');
   });
+
+  it('should add kind column and nullable port fields on existing app table', async () => {
+    const model = fastify.appManager.models.app;
+    const queryInterface = model.sequelize.getQueryInterface();
+    const table = model.getTableName();
+    const before = await queryInterface.describeTable(table);
+    if (before.kind) {
+      await queryInterface.removeColumn(table, 'kind');
+    }
+    await queryInterface.changeColumn(table, 'port', { type: require('sequelize').DataTypes.INTEGER, allowNull: false, defaultValue: 0 });
+    expect(await queryInterface.describeTable(table)).to.not.have.property('kind');
+
+    await fastify.appManager.services.bootstrap.ensureSchema();
+    await fastify.appManager.services.bootstrap.ensureSchema();
+    const after = await queryInterface.describeTable(table);
+    expect(after).to.have.property('kind');
+    expect(after.port.allowNull).to.equal(true);
+  });
 });

@@ -37,7 +37,7 @@ module.exports = fp(async (fastify, options) => {
     return models.app.findOne({ where: { pm2Name } });
   };
 
-  /** 宿主 sync() 不会给已有表加列：老库升级时补齐后续新增的可空列 */
+  /** 宿主 sync() 不会给已有表加列：老库升级时补齐后续新增列 / 可空约束（幂等） */
   const ensureSchema = async () => {
     const { models } = fastify[options.name];
     const targets = [
@@ -64,6 +64,7 @@ module.exports = fp(async (fastify, options) => {
     // linked 应用不占本机端口/目录/PM2：将既有非空列改为可空（幂等）
     const queryInterface = models.app.sequelize.getQueryInterface();
     const table = models.app.getTableName();
+    const tableName = typeof table === 'string' ? table : table.tableName;
     const columns = await queryInterface.describeTable(table);
     for (const name of ['port', 'rootPath', 'pm2Name']) {
       const attr = models.app.rawAttributes[name];
@@ -74,6 +75,16 @@ module.exports = fp(async (fastify, options) => {
           allowNull: true,
           comment: attr.comment
         });
+      }
+    }
+    // 与 model indexes 对齐：老库 addColumn 不会自动建索引
+    const kindAttr = models.app.rawAttributes.kind;
+    if (kindAttr) {
+      const indexName = `${tableName}_${kindAttr.field}`;
+      const indexes = await queryInterface.showIndex(table);
+      const exists = (indexes || []).some(item => item.name === indexName || (item.fields || []).includes(kindAttr.field));
+      if (!exists) {
+        await queryInterface.addIndex(table, [kindAttr.field], { name: indexName });
       }
     }
   };
