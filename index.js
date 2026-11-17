@@ -65,6 +65,12 @@ module.exports = fp(
         signPlatformAssertion: null,
         ensureLinkedRegistration: null,
         getOpsServiceToken: null,
+        /** async ({ app, tree, sourceKey }) => void，权限快照合并后通知宿主（如 tenant.setPermissionSource） */
+        onPermissionsSynced: null,
+        /** async ({ app, sourceKey }) => void，删除 linked 应用时移除权限源 */
+        onPermissionsRemoved: null,
+        /** async () => string[]，导入时校验 appName 不与本平台权限顶层码冲突 */
+        getPermissionRootCodes: null,
         linkSyncIntervalMs: 5 * 60 * 1000,
         linkProxyTimeoutMs: 15000,
         /** async ({ fileId, name, version, request }) => Buffer，版本上传传 fileId 时读取宿主文件 */
