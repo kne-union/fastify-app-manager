@@ -132,7 +132,7 @@ module.exports = fp(async (fastify, options) => {
         response: success('运行中的应用，按创建时间倒序', pageResult('应用', centerApp))
       }
     },
-    async () => services.app.centerList()
+    async request => services.app.centerList({ request })
   );
 
   fastify.get(

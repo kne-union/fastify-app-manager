@@ -328,9 +328,9 @@ module.exports = fp(async (fastify, options) => {
     };
   };
 
-  const centerList = async ({ publicOnly = false } = {}) => {
+  const centerList = async ({ publicOnly = false, request } = {}) => {
     const rows = await models.app.findAll({ where: { status: 'running' }, order: [['createdAt', 'DESC']] });
-    const pageData = rows
+    let pageData = rows
       .filter(app => !publicOnly || isAppPublic(app))
       .map(app => {
         const active = deployProgress.active(app.name);
@@ -352,6 +352,13 @@ module.exports = fp(async (fastify, options) => {
           deployment: active ? { source: active.source } : null
         };
       });
+    // 登录用户的应用中心可由宿主按租户/权限裁剪（公开列表无登录态，不裁剪）
+    if (!publicOnly && request && typeof options.filterCenterApps === 'function') {
+      const filtered = await options.filterCenterApps({ apps: pageData, request });
+      if (Array.isArray(filtered)) {
+        pageData = filtered;
+      }
+    }
     return { pageData, totalCount: pageData.length };
   };
 
