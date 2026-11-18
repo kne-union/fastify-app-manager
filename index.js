@@ -71,6 +71,8 @@ module.exports = fp(
         onPermissionsRemoved: null,
         /** async () => string[]，导入时校验 appName 不与本平台权限顶层码冲突 */
         getPermissionRootCodes: null,
+        /** async ({ apps, request }) => apps，登录用户应用中心列表的裁剪钩子（如按租户已开通权限隐藏应用）；返回保留的应用数组 */
+        filterCenterApps: null,
         linkSyncIntervalMs: 5 * 60 * 1000,
         linkProxyTimeoutMs: 15000,
         /** async ({ fileId, name, version, request }) => Buffer，版本上传传 fileId 时读取宿主文件 */
