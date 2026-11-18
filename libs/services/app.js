@@ -1099,7 +1099,14 @@ module.exports = fp(async (fastify, options) => {
   /** 只做 fs 检查：返回当前版本目录（artifactPath/server）缺失的应用 */
   const listMissingArtifacts = async () => {
     const { Op } = fastify.sequelize.Sequelize;
-    const apps = await models.app.findAll({ where: { currentVersionId: { [Op.ne]: null } } });
+    // 恢复按创建顺序排队：不指定 order 时顺序取决于库的查询计划/索引，改索引后会变
+    const apps = await models.app.findAll({
+      where: { currentVersionId: { [Op.ne]: null } },
+      order: [
+        ['createdAt', 'ASC'],
+        ['id', 'ASC']
+      ]
+    });
     const missing = [];
     for (const app of apps) {
       if (isLinked(app)) {
