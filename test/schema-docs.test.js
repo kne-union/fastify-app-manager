@@ -46,7 +46,7 @@ describe('schema docs', function () {
     await fastify.close();
     uninstallMockPm2();
     await fs.remove(appsRoot).catch(() => {});
-    expect(ownRoutes.length).to.equal(54);
+    expect(ownRoutes.length).to.equal(59);
     expect(missing).to.deep.equal([]);
   });
 });

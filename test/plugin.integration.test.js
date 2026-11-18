@@ -275,6 +275,7 @@ describe('plugin integration', function () {
       name: 'demo',
       label: 'Demo Updated',
       kind: 'managed',
+      status: 'running',
       icon: null,
       description: 'd',
       category: { code: 'tools', name: '工具' },
@@ -371,6 +372,13 @@ describe('plugin integration', function () {
 
     const again = await fastify.inject({ method: 'GET', url: '/api/v1/app-manager/app/center/list' });
     expect(again.json().pageData.find(i => i.name === 'remote-train').entries[0].url).to.equal('http://localhost:3041/tenant');
+
+    const paired = await fastify.appManager.models.app.findOne({ where: { name: 'remote-train' } });
+    await paired.update({ options: Object.assign({}, paired.options, { oidc: { issuer: 'http://platform.test/oidc' } }) });
+    const hinted = (await fastify.inject({ method: 'GET', url: '/api/v1/app-manager/app/center/list' })).json().pageData.find(i => i.name === 'remote-train');
+    expect(hinted.pathUrl).to.equal('http://localhost:3041/');
+    expect(hinted.openUrl).to.equal('http://localhost:3041/?oidc_iss=http%3A%2F%2Fplatform.test%2Foidc');
+    expect(hinted.entries[0].url).to.equal('http://localhost:3041/tenant?oidc_iss=http%3A%2F%2Fplatform.test%2Foidc');
     await new Promise(resolve => remote.close(resolve));
   });
 

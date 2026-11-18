@@ -12,6 +12,11 @@ module.exports = ({ DataTypes }) => {
         allowNull: false,
         comment: '用户可见应用名'
       },
+      labelI18n: {
+        type: DataTypes.JSON,
+        allowNull: true,
+        comment: '应用中心配置的多语言应用名：{ "zh-CN": "订单", "en-US": "Orders" }，没有对应语言时使用 label'
+      },
       kind: {
         type: DataTypes.STRING,
         allowNull: false,

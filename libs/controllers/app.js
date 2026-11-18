@@ -24,6 +24,9 @@ const {
   appDetail,
   appListItem,
   centerApp,
+  centerMenuApp,
+  displaySetting,
+  appStatus,
   version,
   logLine,
   logFile,
@@ -60,7 +63,12 @@ const entriesSchema = {
 };
 
 const appBodyProps = {
-  label: { type: 'string', description: '应用显示名称' },
+  label: { type: 'string', description: '应用显示名称（默认名称，没有对应语言的多语言名称时显示）' },
+  labelI18n: {
+    type: ['object', 'null'],
+    additionalProperties: { type: 'string' },
+    description: '应用多语言名称，如 { "zh-CN": "订单", "en-US": "Orders" }，应用中心默认支持中英文；整体替换，值为空的语言被移除，传 null 或 {} 清除。租户可在租户设置里覆盖，子应用也可在 menus.json 里声明（应用中心配置优先于子应用声明）'
+  },
   domain: { type: ['string', 'null'], description: '绑定域名（Host），访问该域名时整站转发到应用；空字符串或 null 表示不绑定，不能与其他应用重复' },
   icon: { type: 'string', description: '应用图标（文件 ID 或地址）' },
   description: { type: 'string', description: '应用描述' },
@@ -133,6 +141,122 @@ module.exports = fp(async (fastify, options) => {
       }
     },
     async request => services.app.centerList({ request })
+  );
+
+  fastify.get(
+    `${options.prefix}/app/center/menus`,
+    {
+      onRequest: userAuth(),
+      schema: {
+        tags: [TAG_CENTER],
+        summary: '应用中心：声明了菜单的应用及其菜单树（普通登录用户可访问）',
+        description:
+          '只含通过 filterCenterApps 与 filterCenterMenus 的应用；没有声明菜单或菜单为空的应用不出现。菜单快照在应用就绪与 linked 同步时拉取。应用挂了（status=error）但曾经就绪过时仍返回，菜单沿用上一次的快照，进入页面时前端调用 center/status 异步检测并展示错误；从未就绪过的 error 应用不出现',
+        response: success('声明了菜单的应用，按创建时间倒序', pageResult('应用', centerMenuApp))
+      }
+    },
+    async request => services.menu.centerMenus({ request })
+  );
+
+  fastify.get(
+    `${options.prefix}/app/center/display-settings`,
+    {
+      onRequest: userAuth(),
+      schema: {
+        tags: [TAG_CENTER],
+        summary: '应用中心：当前租户可见应用的展示方式（左菜单 / 应用中心）',
+        description: '没有声明菜单的应用 supportsMenu 为 false，只能在应用中心展示。传 tenantId 时（仅 canManageDisplay 放行的超级管理员）查看该租户的展示设置，否则为当前登录租户',
+        querystring: {
+          type: 'object',
+          properties: {
+            tenantId: { type: 'string', description: '要查看的租户 ID（仅超级管理员）' }
+          }
+        },
+        response: success('当前租户可见的运行中应用，按创建时间倒序', pageResult('应用展示设置', displaySetting))
+      }
+    },
+    async request => services.menu.displaySettings({ request, tenantId: request.query?.tenantId })
+  );
+
+  fastify.post(
+    `${options.prefix}/app/center/display-settings/save`,
+    {
+      onRequest: userAuth(),
+      schema: {
+        tags: [TAG_CENTER],
+        summary: '应用中心：修改某租户应用的展示方式与多语言名称（需 canManageDisplay 放行，如超级管理员）',
+        description:
+          'displayMode 与 labelI18n 至少传一项，只更新传入的项。设置为 menu 的应用出现在该租户左菜单并从应用中心隐藏；设置为 center 反之。应用没有声明菜单时不能设置为 menu。labelI18n 整体替换该租户下该应用的多语言名称，值为空的语言会被移除；应用中心与左菜单按用户当前语言取 labelI18n，没有对应语言时显示应用 label。仅 canManageDisplay 放行的超级管理员可调用，需指定 tenantId',
+        body: {
+          type: 'object',
+          required: ['name', 'tenantId'],
+          properties: {
+            tenantId: { type: 'string', description: '要设置的租户 ID（仅超级管理员）' },
+            name: { type: 'string', description: APP_NAME },
+            displayMode: { type: 'string', enum: ['center', 'menu'], description: '展示方式：center 应用中心，menu 左菜单' },
+            labelI18n: { type: 'object', additionalProperties: { type: 'string' }, description: '租户级应用名称多语言，如 { "en-US": "Orders" }；语言码取租户的 supportLanguage' }
+          }
+        },
+        response: success(
+          '保存后的展示方式',
+          obj('展示方式', {
+            name: str('应用 name'),
+            displayMode: str('展示方式，未设置过为 null'),
+            labelI18n: obj('租户级应用名称多语言')
+          })
+        )
+      }
+    },
+    async request => services.menu.saveDisplaySetting({ name: request.body.name, displayMode: request.body.displayMode, labelI18n: request.body.labelI18n, tenantId: request.body.tenantId, request })
+  );
+
+  fastify.get(
+    `${options.prefix}/app/center/status`,
+    {
+      onRequest: userAuth(),
+      schema: {
+        tags: [TAG_CENTER],
+        summary: '应用中心：检测应用当前是否可用（供嵌入组件进入页面后异步调用）',
+        description:
+          '经 canUseApp 把关（需配置）。应用状态不是 running 直接返回 healthy=false 与状态说明；running 时再实际探测一次（托管应用探本机端口，关联应用探远程 /ready），进程已死但状态还没同步过来也能识别。探测超时 3 秒。正常时前端什么都不用做，不正常再切换到错误状态',
+        querystring: {
+          type: 'object',
+          required: ['name'],
+          properties: {
+            name: { type: 'string', description: APP_NAME }
+          }
+        },
+        response: success('应用当前可用状态', appStatus)
+      }
+    },
+    async request => services.menu.appStatus({ name: request.query.name, request })
+  );
+
+  fastify.post(
+    `${options.prefix}/app/center/token`,
+    {
+      onRequest: userAuth(),
+      schema: {
+        tags: [TAG_CENTER],
+        summary: '应用中心：以当前登录用户身份签发访问应用接口的令牌（供嵌入的远程组件使用，需配置 canUseApp 与 issueUserAccessToken）',
+        description: '先经 canUseApp 把关（如租户已开通、用户拥有该应用权限），通过后签发；不信任请求体里的租户，租户由 canUseApp 返回的 { tenantId } 决定',
+        body: {
+          type: 'object',
+          required: ['name'],
+          properties: {
+            name: { type: 'string', description: APP_NAME }
+          }
+        },
+        response: success(
+          '签发的令牌',
+          obj('令牌', {
+            token: str('访问子应用接口的令牌'),
+            expiresAt: any('过期时间，令牌不含 exp 时为 null')
+          })
+        )
+      }
+    },
+    async request => services.menu.issueCenterToken({ name: request.body.name, request })
   );
 
   fastify.get(

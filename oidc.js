@@ -292,6 +292,11 @@ const createAppOidc = (fastify, { origin, issuer, serviceAudience, pathPrefix = 
     }
     const { models, services } = oidc();
     await oidc().whenReady();
+    // 关联应用登记在 OIDC 应用注册表里：标记删除后通知远程关闭由宿主同步过去的托管租户
+    const registered = app.name && services.app?.findByCode?.(app.name);
+    if (registered && registered.status !== 'removed' && registered.serviceClientId === serviceClientId) {
+      await services.app.remove({ id: registered.id });
+    }
     for (const id of [clientId, serviceClientId].filter(Boolean)) {
       const item = await models.client.findOne({ where: { clientId: id } });
       if (item) {

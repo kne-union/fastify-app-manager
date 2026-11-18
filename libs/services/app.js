@@ -21,6 +21,7 @@ const {
 } = require('../utils/env');
 const { readEnvSchema, validateEnv, ENV_SCHEMA_FILE } = require('../utils/envSchema');
 const { prepareVersionArtifact } = require('../utils/version');
+const { isServed, SERVED_STATUSES } = require('../utils/appAvailability');
 const { injectEntryHtml } = require('../utils/entryInject');
 const { ensureLogFiles, readLogTail, readLastLines, appendLog, countLines } = require('../utils/logFiles');
 const { currentFileName, isCurrentFileName, resolveLogFile, listLogFiles } = require('../utils/logRotate');
@@ -30,6 +31,7 @@ const { readSqlDir, writeSqlDir } = require('../utils/versionSql');
 const { createDeployProgress } = require('../utils/deployProgress');
 const pwaDocument = require('@kne/pwa-document');
 const pm2Util = require('../utils/pm2');
+const { parseLabelI18n, mergeLabelI18n, appDefaultLabels, hasLabels } = require('../utils/labelI18n');
 const { KIND_MANAGED, KIND_LINKED, isLinked, linkedBaseUrl, assertNotLinked } = require('../utils/appKind');
 
 const NAME_RE = /^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$/;
@@ -165,14 +167,27 @@ module.exports = fp(async (fastify, options) => {
     return app;
   };
 
+  /** 应用中心配置的多语言名称：空对象与 null 都存 null；不合法 400 */
+  const normalizeAppLabels = raw => {
+    if (raw === null) {
+      return null;
+    }
+    const { value, error } = parseLabelI18n(raw);
+    if (error) {
+      httpError(400, error);
+    }
+    return hasLabels(value) ? value : null;
+  };
+
   const create = async data => {
-    const { name, label, domain, icon, description, category, isPublic, entries, homePath, env, pm2Config, options: appOptions } = data;
+    const { name, label, labelI18n, domain, icon, description, category, isPublic, entries, homePath, env, pm2Config, options: appOptions } = data;
     if (!name || !NAME_RE.test(name)) {
       httpError(400, 'invalid name: use lowercase slug [a-z0-9-]');
     }
     if (!label) {
       httpError(400, 'label is required');
     }
+    const labels = labelI18n === undefined ? null : normalizeAppLabels(labelI18n);
     const exists = await models.app.findOne({ where: { name } });
     if (exists) {
       httpError(409, `app ${name} already exists`);
@@ -221,6 +236,7 @@ module.exports = fp(async (fastify, options) => {
       app = await models.app.create({
         name,
         label,
+        labelI18n: labels,
         kind: KIND_MANAGED,
         domain: domain || null,
         icon: icon || null,
@@ -243,7 +259,7 @@ module.exports = fp(async (fastify, options) => {
     return toPublicApp(app);
   };
 
-  const save = async ({ name, category, isPublic, entries, homePath, ...data }) => {
+  const save = async ({ name, category, isPublic, entries, homePath, labelI18n, ...data }) => {
     const app = await getByName(name);
     const omit = ['name', 'port', 'rootPath', 'pm2Name', 'status', 'currentVersionId', 'homePath', 'kind', 'pathUrl', 'openUrl', 'entries', 'category', 'isPublic', 'secretEnvKeys', 'passthroughEnvKeys'];
     const patch = {};
@@ -252,6 +268,9 @@ module.exports = fp(async (fastify, options) => {
         continue;
       }
       patch[k] = v;
+    }
+    if (labelI18n !== undefined) {
+      patch.labelI18n = normalizeAppLabels(labelI18n);
     }
     // 空域名存 null：domain 有唯一约束，多个应用存 '' 会冲突
     if (patch.domain !== undefined) {
@@ -307,7 +326,11 @@ module.exports = fp(async (fastify, options) => {
     return toPublicApp(app);
   };
 
+  // linked 应用的状态来自健康检查，子应用重启恢复后在这里补一次复查（节流）
+  const recheckLinkedHealth = () => fastify[options.name].services.link?.recheckUnhealthyLinked?.();
+
   const list = async ({ filter = {}, perPage = 20, currentPage = 1 } = {}) => {
+    await recheckLinkedHealth();
     const where = {};
     if (filter.status) {
       where.status = filter.status;
@@ -328,26 +351,46 @@ module.exports = fp(async (fastify, options) => {
     };
   };
 
-  const centerList = async ({ publicOnly = false, request } = {}) => {
-    const rows = await models.app.findAll({ where: { status: 'running' }, order: [['createdAt', 'DESC']] });
+  // 关联应用打开时带上本平台 issuer：远程（standalone + 新版 fastify-oidc）据此用本平台账号登录，不认识该参数的远程忽略
+  const withPlatformHint = (url, app) => {
+    const issuer = isLinked(app) ? app.options?.oidc?.issuer : null;
+    if (!issuer || !url) {
+      return url;
+    }
+    const [head, hash] = String(url).split('#');
+    const joined = `${head}${head.includes('?') ? '&' : '?'}oidc_iss=${encodeURIComponent(issuer)}`;
+    return hash === undefined ? joined : `${joined}#${hash}`;
+  };
+
+  const centerList = async ({ publicOnly = false, request, includeMenuApps = false, includeUnavailable = false } = {}) => {
+    await recheckLinkedHealth();
+    // includeUnavailable：挂了（error）但有缓存的应用也返回，供菜单与展示设置按上一次的快照继续提供；应用中心卡片与公开列表只含运行中
+    const withDown = includeUnavailable && !publicOnly;
+    const rows = await models.app.findAll({ where: { status: withDown ? SERVED_STATUSES : 'running' }, order: [['createdAt', 'DESC']] });
     let pageData = rows
+      .filter(app => (withDown ? isServed(app) : true))
       .filter(app => !publicOnly || isAppPublic(app))
       .map(app => {
         const active = deployProgress.active(app.name);
         const linked = isLinked(app);
         const base = linked ? linkedBaseUrl(app) : null;
         const pathUrl = linked && base ? `${base}/` : `${mountPrefix(app.name)}/`;
-        const entries = resolveEntries(app).filter(entry => entry.showInCenter);
+        const entries = resolveEntries(app)
+          .filter(entry => entry.showInCenter)
+          .map(entry => Object.assign(entry, { url: withPlatformHint(entry.url, app) }));
+        const defaultLabels = appDefaultLabels(app);
         return {
           name: app.name,
           label: app.label,
+          ...(hasLabels(defaultLabels) ? { labelI18n: defaultLabels } : {}),
           kind: linked ? KIND_LINKED : KIND_MANAGED,
+          status: app.status,
           icon: app.icon,
           description: app.description,
           category: app.options?.category || null,
           isPublic: isAppPublic(app),
           pathUrl,
-          openUrl: pathUrl,
+          openUrl: withPlatformHint(pathUrl, app),
           entries,
           deployment: active ? { source: active.source } : null
         };
@@ -358,6 +401,18 @@ module.exports = fp(async (fastify, options) => {
       if (Array.isArray(filtered)) {
         pageData = filtered;
       }
+    }
+    // 租户设置为「左菜单展示」的应用不再出现在应用中心（includeMenuApps 供菜单与展示设置自身使用）
+    if (!publicOnly && request && !includeMenuApps) {
+      const menuNames = await fastify[options.name].services.menu.menuDisplayedNames({ request, names: pageData.map(item => item.name) });
+      if (menuNames.size) {
+        pageData = pageData.filter(item => !menuNames.has(item.name));
+      }
+    }
+    // 租户为应用配置的多语言名称覆盖默认名称后随列表下发，前端按当前语言取 labelI18n，没有则用 label
+    if (!publicOnly && request) {
+      const labels = await fastify[options.name].services.menu.tenantLabels({ request, names: pageData.map(item => item.name) });
+      pageData = pageData.map(item => (labels.has(item.name) ? Object.assign({}, item, { labelI18n: mergeLabelI18n(item.labelI18n, labels.get(item.name)) }) : item));
     }
     return { pageData, totalCount: pageData.length };
   };
@@ -824,6 +879,13 @@ module.exports = fp(async (fastify, options) => {
             }
           } catch (e) {
             fastify.log.warn({ err: e, appId }, 'claim owned tables after ready failed');
+          }
+          // 运行后拉取子应用声明的菜单快照，失败只记日志，不影响就绪
+          try {
+            const menuApp = await models.app.findByPk(appId);
+            await fastify[options.name].services.menu.refresh(menuApp);
+          } catch (e) {
+            fastify.log.warn({ err: e, appId }, 'refresh app menus after ready failed');
           }
         } else {
           const again = await getPm2ProcessStatus(app.pm2Name);
@@ -1455,6 +1517,7 @@ module.exports = fp(async (fastify, options) => {
     const snapshot = app.toJSON();
     await models.appVersion.destroy({ where: { appName: name } });
     await models.appOpenApiRecord.destroy({ where: { appName: name }, force: true });
+    await models.appTenantDisplay.destroy({ where: { appName: name }, force: true });
     if (!linked && app.rootPath) {
       await fs.remove(app.rootPath).catch(() => {});
     }
