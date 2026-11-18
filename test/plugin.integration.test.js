@@ -319,6 +319,47 @@ describe('plugin integration', function () {
     await fastify.appManager.models.app.update({ status: 'idle' }, { where: { name: ['demo', 'demo-social'] } });
   });
 
+  it('linked entries keep relative path and do not stack baseUrl on save/center', async () => {
+    const dirtyPath = '/http://localhost:3041/http://localhost:3041/tenant';
+    await fastify.appManager.models.app.create({
+      name: 'remote-train',
+      label: '培训系统',
+      kind: 'linked',
+      status: 'running',
+      domain: null,
+      icon: null,
+      description: null,
+      env: {},
+      pm2Config: {},
+      options: {
+        kind: 'linked',
+        baseUrl: 'http://localhost:3041',
+        apiBaseUrl: 'http://localhost:8041',
+        entries: [{ label: '首页', path: dirtyPath, showInCenter: true }],
+        isPublic: true
+      },
+      port: null,
+      rootPath: null,
+      pm2Name: null,
+      message: null
+    });
+
+    const center = await fastify.inject({ method: 'GET', url: '/api/v1/app-manager/app/center/list' });
+    const item = center.json().pageData.find(i => i.name === 'remote-train');
+    expect(item.pathUrl).to.equal('http://localhost:3041/');
+    expect(item.entries).to.deep.equal([{ label: '首页', path: '/tenant', showInCenter: true, url: 'http://localhost:3041/tenant' }]);
+
+    const saved = await fastify.inject({
+      method: 'POST',
+      url: '/api/v1/app-manager/app/save',
+      payload: { name: 'remote-train', entries: item.entries }
+    });
+    expect(saved.json().entries).to.deep.equal([{ label: '首页', path: '/tenant', showInCenter: true, url: 'http://localhost:3041/tenant' }]);
+
+    const again = await fastify.inject({ method: 'GET', url: '/api/v1/app-manager/app/center/list' });
+    expect(again.json().pageData.find(i => i.name === 'remote-train').entries[0].url).to.equal('http://localhost:3041/tenant');
+  });
+
   it('should upload version deploy lifecycle and read logs', async () => {
     await fastify.inject({
       method: 'POST',

@@ -64,16 +64,46 @@ module.exports = fp(async (fastify, options) => {
     }
     return category.code ? { code: category.code, name: category.name || category.code } : null;
   };
+  /**
+   * 入口 path 一律相对应用根入库。
+   * 详情/中心列表若曾把绝对 url 写回 options.entries，或出现 /http://… 脏数据，这里剥成 pathname，避免与 baseUrl 重复拼接。
+   */
+  const toRelativeEntryPath = raw => {
+    let path = String(raw || '').trim();
+    if (!path) {
+      return '';
+    }
+    for (let i = 0; i < 8; i += 1) {
+      if (/^https?:\/\//i.test(path)) {
+        try {
+          const u = new URL(path);
+          path = `${u.pathname || '/'}${u.search || ''}${u.hash || ''}` || '/';
+          continue;
+        } catch (e) {
+          return '';
+        }
+      }
+      if (/^\/https?:\/\//i.test(path)) {
+        path = path.slice(1);
+        continue;
+      }
+      break;
+    }
+    if (!path.startsWith('/')) {
+      path = `/${path}`;
+    }
+    return path;
+  };
+
   // 应用入口：label + 相对应用根的 path；去空、补前导 /、按 path 去重；showInCenter 未设置视为开放给前台
   const normalizeEntries = entries => {
     const seen = new Set();
     return (Array.isArray(entries) ? entries : []).reduce((result, item) => {
       const label = String(item?.label || '').trim();
-      const rawPath = String(item?.path || '').trim();
-      if (!label || !rawPath) {
+      const entryPath = toRelativeEntryPath(item?.path);
+      if (!label || !entryPath) {
         return result;
       }
-      const entryPath = rawPath.startsWith('/') ? rawPath : `/${rawPath}`;
       if (!seen.has(entryPath)) {
         seen.add(entryPath);
         result.push({ label, path: entryPath, showInCenter: item?.showInCenter !== false });
@@ -98,9 +128,10 @@ module.exports = fp(async (fastify, options) => {
     const remote = linked ? linkedBaseUrl(appLike) : null;
     const base = remote || mountPrefix(appLike.name);
     return normalizeEntries(appLike.options?.entries).map(entry => {
-      const pathPart = entry.path.startsWith('/') ? entry.path : `/${entry.path}`;
-      const url = remote ? `${remote}${pathPart}` : `${base}${pathPart}`;
-      return Object.assign({}, entry, { path: remote ? url : entry.path, url });
+      // path 始终相对，仅 url 拼绝对；linked 若把 path 改成绝对再经 save 回写会与 baseUrl 叠成 http://host/http://host/...
+      const pathPart = entry.path;
+      const url = `${String(base).replace(/\/+$/, '')}${pathPart}`;
+      return Object.assign({}, entry, { path: pathPart, url });
     });
   };
 
@@ -298,15 +329,7 @@ module.exports = fp(async (fastify, options) => {
         const linked = isLinked(app);
         const base = linked ? linkedBaseUrl(app) : null;
         const pathUrl = linked && base ? `${base}/` : `${mountPrefix(app.name)}/`;
-        const entries = resolveEntries(app)
-          .filter(entry => entry.showInCenter)
-          .map(entry =>
-            linked && base
-              ? Object.assign({}, entry, {
-                  path: entry.path.startsWith('http') ? entry.path : `${base}${entry.path.startsWith('/') ? '' : '/'}${entry.path}`
-                })
-              : entry
-          );
+        const entries = resolveEntries(app).filter(entry => entry.showInCenter);
         return {
           name: app.name,
           label: app.label,
