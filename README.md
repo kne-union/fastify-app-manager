@@ -208,6 +208,7 @@ await fastify.listen({ port: 3000 });
 | `issueUserAccessToken` | function | 否 | `null` | `async ({ app, userId, tenantId }) => accessToken`，以登录用户身份签发子应用令牌；未配置时 `POST .../app/open-api/token` 返回 400。接 OIDC 时传 `appOidc.issueUserAccessToken` |
 | `resolveVersionFile` | function | 否 | `null` | `async ({ fileId, name, version, request }) => Buffer`，版本上传传 `fileId`（而非 multipart 文件）时调用，返回 zip 内容；未配置时传 `fileId` 返回 400。版本记录保存 `fileId`；这类版本只在当前部署时常驻磁盘，部署非当前版本或启动时当前版本目录缺失会再次调用以重建 |
 | `saveIconFile` | function | 否 | `null` | `async ({ buffer, filename, mimetype }) => fileId`，凭 installKey 关联外部应用（`POST .../app/link/import`）且未传 `icon` 时，平台从远程应用站点收集 favicon / apple-touch-icon / manifest 图标，按真实像素取最大的一张，经此回调存入宿主文件系统并返回文件 id，写入应用 `icon`。未配置则不抓取；抓取或保存失败只记告警，不阻断关联 |
+| `filterCenterApps` | function | 否 | `null` | `async ({ apps, request }) => apps`，登录用户的应用中心列表（`GET .../app/center/list`）返回前调用，宿主可据 `request` 裁剪（如按租户已开通权限隐藏被关闭的应用），返回保留的应用数组；返回非数组则不裁剪。公开列表（`center/public-list`）无登录态，不调用 |
 | `defaultAppDb` | object | 否 | `appsRoot/_shared/apps-data.sqlite` | 托管应用默认库（须与宿主主库分离） |
 | `dbQueryMaxRows` | number | 否 | `500` | 只读 query SQL 最大返回行数 |
 | `pm2Defaults` | object | 否 | 见下表 | 全局 PM2 默认；可被应用 `pm2Config` 覆盖 |
