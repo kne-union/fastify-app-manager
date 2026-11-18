@@ -2,6 +2,7 @@ const fp = require('fastify-plugin');
 const { KIND_LINKED, isLinked, linkedBaseUrl, linkedApiBaseUrl } = require('../utils/appKind');
 const { mergeAppPermissionTree } = require('../utils/permissionSnapshot');
 const { createProxyAuditStore } = require('../utils/proxyAudit');
+const { discoverRemoteIcon } = require('../utils/remoteIcon');
 const { SYSTEM_ENV_KEYS, DB_CONNECTION_KEYS, DB_DEDICATED_KEY } = require('../utils/env');
 
 const NAME_RE = /^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$/;
@@ -201,9 +202,35 @@ module.exports = fp(async (fastify, options) => {
   };
 
   /**
+   * 图标优先级：用户上传（文件 id）> 远程 manifest 给的 icon > 从远程前端站点抓取并经宿主 saveIconFile 存入文件系统。
+   * 抓取/保存失败只记告警，不阻断关联。
+   */
+  const resolveLinkedIcon = async ({ icon, manifestIcon, baseUrl }) => {
+    if (icon) {
+      return icon;
+    }
+    if (manifestIcon) {
+      return manifestIcon;
+    }
+    if (typeof options.saveIconFile !== 'function') {
+      return null;
+    }
+    try {
+      const found = await discoverRemoteIcon({ baseUrl, timeoutMs: options.linkIconTimeoutMs });
+      if (!found) {
+        return null;
+      }
+      return (await options.saveIconFile(found)) || null;
+    } catch (e) {
+      fastify.log.warn({ err: e, baseUrl }, 'linked app icon fetch/save failed');
+      return null;
+    }
+  };
+
+  /**
    * 凭 installKey 导入外部应用：redeem → 建 linked 记录 → OIDC → activate
    */
-  const importByInstallKey = async ({ installKey, name: overrideName, label: overrideLabel } = {}) => {
+  const importByInstallKey = async ({ installKey, name: overrideName, label: overrideLabel, icon: overrideIcon } = {}) => {
     if (!installKey) {
       httpError(400, 'installKey 必填');
     }
@@ -250,13 +277,14 @@ module.exports = fp(async (fastify, options) => {
     const manifest = redeemed.data || {};
     const label = overrideLabel || manifest.label || key.appLabel || name;
     const entries = Array.isArray(manifest.entries) ? manifest.entries : [{ label: '首页', path: '/', showInCenter: true }];
+    const icon = await resolveLinkedIcon({ icon: overrideIcon, manifestIcon: manifest.icon, baseUrl });
 
     const app = await models.app.create({
       name,
       label,
       kind: KIND_LINKED,
       domain: null,
-      icon: manifest.icon || null,
+      icon,
       description: manifest.description || null,
       env: {},
       pm2Config: {},

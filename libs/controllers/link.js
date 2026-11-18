@@ -21,7 +21,8 @@ module.exports = fp(async (fastify, options) => {
           properties: {
             installKey: { type: 'string', description: '远程一次性安装密钥（base64url JSON）' },
             name: { type: 'string', description: '可选覆盖应用 slug；默认取 key 内 appName' },
-            label: { type: 'string', description: '可选覆盖显示名' }
+            label: { type: 'string', description: '可选覆盖显示名' },
+            icon: { type: 'string', description: '可选应用图标（文件 id）；未传时从远程应用站点抓取 favicon/manifest 图标并经 saveIconFile 保存，抓取失败则不设置图标' }
           }
         },
         response: success('导入后的应用', obj({ name: str('应用 name'), kind: str('managed|linked'), status: str('状态') }))
