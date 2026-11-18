@@ -71,6 +71,36 @@ module.exports = fp(async (fastify, options) => {
     httpError(400, '未配置 ensureLinkedRegistration，无法完成外部应用 OIDC 登记');
   };
 
+  /**
+   * 关联应用登记进宿主 OIDC 应用注册表：权限树已由权限快照挂在顶层 <name> 下（permissionRoot），
+   * 远程回传 tenantSyncUri 时以 independent 登记，宿主租户变更推送给远程，远程把宿主租户同步为只读托管租户
+   */
+  const registerLinkedOidcApp = async (app, tenantSyncUri) => {
+    const register = fastify.oidc?.services?.app?.register;
+    const oidcInfo = app.options?.oidc;
+    if (typeof register !== 'function' || !tenantSyncUri || !oidcInfo?.serviceClientId) {
+      return;
+    }
+    const current = fastify.oidc.services.app.findByCode?.(app.name);
+    if (current && current.status === 'open' && current.tenantSyncUri === tenantSyncUri && current.serviceClientId === oidcInfo.serviceClientId && current.permissions?.root) {
+      return;
+    }
+    try {
+      await register({
+        serviceClientId: oidcInfo.serviceClientId,
+        code: app.name,
+        name: app.label || app.name,
+        tenantMode: 'independent',
+        clientId: oidcInfo.clientId,
+        resource: oidcInfo.audience,
+        permissionRoot: true,
+        tenantSyncUri
+      });
+    } catch (e) {
+      fastify.log.warn({ err: e, app: app.name }, 'linked app oidc register failed');
+    }
+  };
+
   const getOpsToken = async (app, scope) => {
     if (typeof options.getOpsServiceToken === 'function') {
       return options.getOpsServiceToken({ app, scope });
@@ -318,7 +348,8 @@ module.exports = fp(async (fastify, options) => {
           audience: oidcInfo.audience,
           clientId: oidcInfo.clientId,
           serviceClientId: oidcInfo.serviceClientId,
-          serviceClientSecret: oidcInfo.serviceClientSecret
+          serviceClientSecret: oidcInfo.serviceClientSecret,
+          appCode: name
         }),
         signal: AbortSignal.timeout(options.linkProxyTimeoutMs || 15000)
       });
@@ -342,6 +373,7 @@ module.exports = fp(async (fastify, options) => {
       });
       await app.reload();
       await applyPermissionSnapshot(app, manifest.permissions || []);
+      await registerLinkedOidcApp(app, activated.data?.tenantSyncUri);
     } catch (e) {
       if (typeof options.onAppRemoved === 'function' && oidcInfo) {
         try {
@@ -390,8 +422,9 @@ module.exports = fp(async (fastify, options) => {
 
     let syncError = null;
     let remotePerms = app.options?.permissionsSnapshot || app.options?.permissionTree || [];
+    let linkStatus = null;
     try {
-      await remoteFetch(app, {
+      linkStatus = await remoteFetch(app, {
         path: '/app-ops/link/status',
         query: { issuer: app.options?.oidc?.issuer },
         scope: 'app-ops:permissions:read'
@@ -430,12 +463,58 @@ module.exports = fp(async (fastify, options) => {
           await options.ensureLinkedRegistration({ app, remoteBaseUrl: baseUrl });
         }
         await app.reload();
+        await registerLinkedOidcApp(app, linkStatus?.tenantSyncUri);
+        if (readyOk) {
+          await fastify[options.name].services.menu.refresh(app);
+        }
       } catch (e) {
         fastify.log.warn({ err: e, app: app.name }, 'linked apply snapshot failed');
+      }
+    } else if (app.options?.permissionTree && typeof options.onPermissionsSynced === 'function') {
+      // 子应用挂了拿不到最新权限：租户权限源只在内存里，宿主重启时若不用上一次的权限树恢复，
+      // 该应用的权限会从租户权限树里消失（角色配置看不到，应用还会被当成没有权限树而放行）
+      try {
+        await options.onPermissionsSynced({ app, tree: app.options.permissionTree, sourceKey: `app:${app.name}` });
+      } catch (e) {
+        fastify.log.warn({ err: e, app: app.name }, 'linked restore cached permissions failed');
       }
     }
 
     return { name: app.name, ok: readyOk, status: app.status, syncError: syncError?.message || null };
+  };
+
+  const recheckAt = new Map();
+  const recheckInflight = new Map();
+
+  /**
+   * 健康检查失败（error）的 linked 应用按需复查：子应用重启恢复后，访问网关或列表即可恢复，不必等定时同步或打开详情。
+   * 同一应用 linkRecheckIntervalMs 内最多复查一次，并发请求共用同一次复查。
+   */
+  const recheckUnhealthy = async app => {
+    if (!app || !isLinked(app) || app.status !== 'error') {
+      return app;
+    }
+    if (recheckInflight.has(app.name)) {
+      return recheckInflight.get(app.name);
+    }
+    if (Date.now() - (recheckAt.get(app.name) || 0) < options.linkRecheckIntervalMs) {
+      return app;
+    }
+    recheckAt.set(app.name, Date.now());
+    const run = syncOne(app)
+      .then(() => app.reload())
+      .catch(err => {
+        fastify.log.warn({ err, app: app.name }, 'linked app recheck failed');
+        return app;
+      })
+      .finally(() => recheckInflight.delete(app.name));
+    recheckInflight.set(app.name, run);
+    return run;
+  };
+
+  const recheckUnhealthyLinked = async () => {
+    const apps = await models.app.findAll({ where: { kind: KIND_LINKED, status: 'error' } });
+    await Promise.all(apps.map(recheckUnhealthy));
   };
 
   const syncAllLinked = async () => {
@@ -639,6 +718,8 @@ module.exports = fp(async (fastify, options) => {
       importByInstallKey,
       syncOne,
       syncAllLinked,
+      recheckUnhealthy,
+      recheckUnhealthyLinked,
       decodeInstallKey,
       proxy,
       remoteFetch,

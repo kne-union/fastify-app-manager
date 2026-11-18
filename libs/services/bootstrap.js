@@ -43,7 +43,8 @@ module.exports = fp(async (fastify, options) => {
     const targets = [
       [models.appVersion, ['fileId', 'migrationFiles', 'envSchema']],
       [models.appOpenApiRecord, ['searchText']],
-      [models.app, ['kind']]
+      [models.app, ['kind', 'labelI18n']],
+      [models.appTenantDisplay, ['labelI18n']]
     ];
     for (const [model, names] of targets) {
       const queryInterface = model.sequelize.getQueryInterface();
@@ -76,6 +77,13 @@ module.exports = fp(async (fastify, options) => {
           comment: attr.comment
         });
       }
+    }
+    // 租户展示设置只配置多语言名称时不记展示方式：displayMode 既有非空约束改为可空（幂等）
+    const displayModel = models.appTenantDisplay;
+    const displayColumns = await queryInterface.describeTable(displayModel.getTableName());
+    const modeAttr = displayModel.rawAttributes.displayMode;
+    if (displayColumns[modeAttr.field]?.allowNull === false) {
+      await queryInterface.changeColumn(displayModel.getTableName(), modeAttr.field, { type: modeAttr.type, allowNull: true, comment: modeAttr.comment });
     }
     // 与 model indexes 对齐：老库 addColumn 不会自动建索引
     const kindAttr = models.app.rawAttributes.kind;

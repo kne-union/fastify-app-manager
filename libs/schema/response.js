@@ -71,6 +71,7 @@ const appProps = {
   id: any('应用 ID'),
   name: str('应用 name（小写 slug，同时作为访问路径 /app/{name}）'),
   label: str('应用显示名称'),
+  labelI18n: obj('应用中心配置的多语言名称（不含租户与子应用声明），没有配置为 null'),
   domain: str('绑定的域名，未绑定为 null'),
   icon: str('应用图标（文件 ID 或地址）'),
   description: str('应用描述'),
@@ -110,13 +111,71 @@ const appListItem = obj('应用', Object.assign({}, appProps, { deployment }));
 const centerApp = obj('应用中心中的应用', {
   name: str('应用 name'),
   label: str('应用显示名称'),
+  labelI18n: obj('应用多语言名称（租户配置 > 应用中心配置 > 子应用 menus.json 声明合并后的结果，没有配置为 {}），前端按当前语言取 labelI18n[语言]，没有则用 label'),
   icon: str('应用图标'),
   description: str('应用描述'),
   category: any('应用分类：{ code, name } 或分类编码字符串，未设置为 null'),
   isPublic: bool('是否公开'),
+  status: str('应用状态：running 运行中；仅菜单与展示设置场景会带出 error（已挂但有缓存）的应用'),
   pathUrl: str('访问地址，如 /app/{name}/'),
   entries: list('开放给前台的应用入口', entry),
   deployment: obj('正在部署时为 { source }，否则为 null', { source: str('部署来源') })
+});
+
+const menuNode = obj('菜单节点', {
+  key: str('同级唯一 key'),
+  fullKey: str('从顶层到本节点的 key 链，以 / 连接，用于路由'),
+  label: str('展示名'),
+  labelI18n: any('多语言展示名 { [语言]: 文案 }'),
+  icon: str('图标标识'),
+  permission: str('子应用权限树内的相对权限码，缺省表示开通应用即可见'),
+  permissionCode: str('完整权限码：{应用 name}:{permission}'),
+  component: str('远程组件模式：src/components 下的组件目录名（仅叶子菜单）'),
+  props: any('远程组件模式：传给页面组件的静态 props'),
+  path: str('iframe / blank 模式：相对应用根的路径（仅叶子菜单）'),
+  children: list('子菜单（最多两级）')
+});
+
+const centerMenuApp = obj('应用中心中声明了菜单的应用', {
+  name: str('应用 name'),
+  label: str('应用显示名称'),
+  labelI18n: obj('应用多语言名称（租户配置 > 应用中心配置 > 子应用 menus.json 声明合并后的结果，没有配置为 {}），前端按当前语言取 labelI18n[语言]，没有则用 label'),
+  icon: str('应用图标'),
+  kind: str('managed 托管应用，linked 外部关联应用'),
+  status: str('应用状态：running 运行中；error 表示已挂，菜单沿用上一次的快照，进入页面时由前端异步检测并展示错误'),
+  integration: str('集成方式：remote 远程组件，iframe，blank 新窗口'),
+  baseUrl: str('应用根地址：托管应用为 /app/{name}，linked 为其绝对地址'),
+  version: str('当前部署版本号，宿主据此判断是否需要重载远程入口'),
+  remote: obj('远程组件信息（integration=remote）', {
+    name: str('联邦容器名，等于应用 name'),
+    preset: str('预设组件名，默认 ComponentPreset'),
+    url: str('远程入口基础地址，入口文件为 {url}/remoteEntry.js')
+  }),
+  apiHost: str('子应用 API 前缀（integration=remote）'),
+  menus: list('菜单树', menuNode)
+});
+
+const displaySetting = obj('应用在当前租户的展示方式', {
+  name: str('应用 name'),
+  label: str('应用显示名称'),
+  labelI18n: obj('租户为应用配置的多语言名称，如 { "en-US": "Orders" }；没有配置为 {}'),
+  defaultLabelI18n: obj('不含租户配置的默认多语言名称（应用中心配置覆盖子应用声明），租户编辑名称时可作占位参考'),
+  icon: str('应用图标'),
+  kind: str('managed 托管应用，linked 外部关联应用'),
+  status: str('应用状态：running 运行中；error 表示已挂，菜单沿用上一次的快照'),
+  supportsMenu: bool('应用是否声明了可展示的菜单；false 时只能在应用中心展示'),
+  menuCount: num('可展示的菜单页面数（叶子菜单）'),
+  displayMode: str('当前生效的展示方式：center 应用中心，menu 左菜单'),
+  configured: bool('租户是否显式设置过；false 表示使用默认值'),
+  menuStatus: str('菜单快照状态：ok / none 未声明 / error 拉取或校验失败'),
+  menuError: str('菜单快照失败原因')
+});
+
+const appStatus = obj('应用当前可用状态', {
+  name: str('应用 name'),
+  status: str('应用状态：running / error / stopped / deploying ...'),
+  healthy: bool('是否可用：状态为 running 且探测可达'),
+  message: str('不可用原因；可用时为 null')
 });
 
 const version = obj('应用版本', {
@@ -222,6 +281,9 @@ module.exports = {
   appDetail,
   appListItem,
   centerApp,
+  centerMenuApp,
+  displaySetting,
+  appStatus,
   version,
   logLine,
   logFile,

@@ -208,7 +208,15 @@ await fastify.listen({ port: 3000 });
 | `issueUserAccessToken` | function | 否 | `null` | `async ({ app, userId, tenantId }) => accessToken`，以登录用户身份签发子应用令牌；未配置时 `POST .../app/open-api/token` 返回 400。接 OIDC 时传 `appOidc.issueUserAccessToken` |
 | `resolveVersionFile` | function | 否 | `null` | `async ({ fileId, name, version, request }) => Buffer`，版本上传传 `fileId`（而非 multipart 文件）时调用，返回 zip 内容；未配置时传 `fileId` 返回 400。版本记录保存 `fileId`；这类版本只在当前部署时常驻磁盘，部署非当前版本或启动时当前版本目录缺失会再次调用以重建 |
 | `saveIconFile` | function | 否 | `null` | `async ({ buffer, filename, mimetype }) => fileId`，凭 installKey 关联外部应用（`POST .../app/link/import`）且未传 `icon` 时，平台从远程应用站点收集 favicon / apple-touch-icon / manifest 图标，按真实像素取最大的一张，经此回调存入宿主文件系统并返回文件 id，写入应用 `icon`。未配置则不抓取；抓取或保存失败只记告警，不阻断关联 |
+| （宿主接入 `@kne/fastify-oidc`） | — | — | — | 关联外部应用激活或同步时，远程 `@kne/fastify-app-runtime` 回传 `tenantSyncUri`（远程为新版 fastify-oidc 的 standalone 应用）则把该应用以 `tenantMode: 'independent'`、`permissionRoot: true` 登记进 `fastify.oidc.services.app`：开通判断与权限去前缀按顶层 `<name>`，宿主租户变更推送给远程，远程把宿主租户同步为只读托管租户、镜像宿主用户；删除应用时（`appOidc.onAppRemoved`）标记移除该登记。已配对的关联应用在应用中心列表里的 `openUrl` 与 `entries[].url` 带 `oidc_iss={本平台 issuer}`，远程据此用本平台账号登录 |
 | `filterCenterApps` | function | 否 | `null` | `async ({ apps, request }) => apps`，登录用户的应用中心列表（`GET .../app/center/list`）返回前调用，宿主可据 `request` 裁剪（如按租户已开通权限隐藏被关闭的应用），返回保留的应用数组；返回非数组则不裁剪。公开列表（`center/public-list`）无登录态，不调用 |
+| `filterCenterMenus` | function | 否 | `null` | `async ({ menus, app, request }) => menus`，登录用户菜单列表（`GET .../app/center/menus`）按应用逐个调用，宿主可据 `request` 做用户级裁剪（如按权限码 `menu.permissionCode` 隐藏菜单），返回保留的菜单数组；返回非数组则不裁剪；裁空的应用不出现 |
+| `canUseApp` | function | 否 | `null` | `async ({ app, request }) => boolean \| { tenantId }`，签发应用访问令牌（`POST .../app/center/token`）前的把关钩子：返回 falsy 拒绝（403），返回 `{ tenantId }` 则以该租户签发；**未配置时该接口返回 400**，不信任请求体里的租户；网关换令牌（`gatewayTokenExchange`）同样经它把关 |
+| `gatewayTokenExchange` | boolean | 否 | `true` | 网关 `/app/{name}` 收到宿主登录令牌（经 `createUserAuthenticate` 校验通过、`aud` 不是该应用）时，经 `canUseApp` 把关后用 `issueUserAccessToken` 换成该应用的用户令牌再转发（每次请求都经 `canUseApp` 把关并现签，不缓存：子应用可能因权限变更吊销已签发的令牌）；拒绝时 403 且不转发宿主令牌。需同时配置 `canUseApp` 与 `issueUserAccessToken`；`false` 关闭 |
+| `linkRecheckIntervalMs` | number | 否 | `15000` | linked 应用健康检查失败（`status=error`）后，访问网关、应用中心列表、左菜单与管理端列表时按需复查（`/ready` 与权限同步）的最小间隔；子应用重启恢复后不必等定时同步或打开详情 |
+| `getTenantId` | function | 否 | `null` | `async ({ request }) => string \| null`，当前请求所属租户 id，用于按租户保存应用展示方式；不传则所有用户共用一份设置 |
+| `canManageDisplay` | function | 否 | `null` | `async ({ request, tenantId }) => boolean`，是否允许管理指定租户的应用展示方式（应由超级管理员放行，不应对普通租户放行）；仅在请求传了 `tenantId` 且返回 truthy 时可读写该租户的设置，**未配置时写入返回 403** |
+| `defaultDisplayMode` | string | 否 | `center` | 租户未设置时的默认展示方式：`center` 应用中心 \| `menu` 左菜单；仅对声明了菜单的应用生效，没有菜单的应用只能在应用中心 |
 | `defaultAppDb` | object | 否 | `appsRoot/_shared/apps-data.sqlite` | 托管应用默认库（须与宿主主库分离） |
 | `dbQueryMaxRows` | number | 否 | `500` | 只读 query SQL 最大返回行数 |
 | `pm2Defaults` | object | 否 | 见下表 | 全局 PM2 默认；可被应用 `pm2Config` 覆盖 |
@@ -276,7 +284,8 @@ await fastify.listen({ port: 3000 });
 | 参数名 | 类型 | 必填 | 默认值 | 说明 |
 |--------|------|------|--------|------|
 | name | string | 是 | - | slug：`^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$` |
-| label | string | 是 | - | 展示名 |
+| label | string | 是 | - | 展示名（默认名称，没有对应语言的多语言名称时显示） |
+| labelI18n | object | 否 | - | 多语言展示名，如 `{ "zh-CN": "订单", "en-US": "Orders" }`，应用中心默认支持中英文；语言码须形如 `zh-CN` / `en-US`，名称最长 100 字符，否则 400；值为空的语言被丢弃 |
 | domain | string / null | 否 | - | 绑定 Host（唯一）；冲突返回 409；空值存为 `null` |
 | icon | string | 否 | - | 图标 |
 | description | string | 否 | - | 描述 |
@@ -297,6 +306,7 @@ await fastify.listen({ port: 3000 });
 |--------|------|------|------|
 | name | string | 是 | 应用 slug |
 | label / domain / icon / description / env / pm2Config / options | - | 否 | 传入的字段才更新；`env` 按 patch 语义合并；`domain` 传 `null` / `''` 解绑域名（存为 `null`） |
+| labelI18n | object / null | 否 | 整体替换多语言展示名（规则同创建）；传 `null` / `{}` 清除；不传不影响已有名称 |
 | category | object / string / null | 否 | 合并写入 `options.category`（对象只保留 `{ code, name }`），不影响 `options` 其它键；传空值清除分类 |
 | isPublic | boolean | 否 | 合并写入 `options.isPublic`，不影响 `options` 其它键 |
 | entries | array / null | 否 | 整体替换 `options.entries`（规则同创建），不影响 `options` 其它键；传 `[]` / `null` 清空入口 |
@@ -629,6 +639,7 @@ data: {"progressId":"p-1","step":"ready","status":"done","detail":null,"message"
     {
       "name": "demo",
       "label": "Demo",
+      "labelI18n": { "zh-CN": "演示", "en-US": "Demo" },
       "icon": "file-id",
       "description": "d",
       "category": { "code": "tools", "name": "工具" },
@@ -647,7 +658,108 @@ data: {"progressId":"p-1","step":"ready","status":"done","detail":null,"message"
 
 `entries` 只含 `showInCenter` 不为 `false` 的入口。
 
+`labelI18n` 是应用名称各语言的合并结果，仅配置过的应用才有，前端按用户当前语言取 `labelI18n[语言]`，没有则显示 `label`。来源优先级（逐语言覆盖）：当前租户配置（`app/center/display-settings/save`，仅登录列表）> 应用中心配置（`app/create` / `app/save` 的 `labelI18n`）> 子应用声明（`menus.json` 顶层 `labelI18n`，随菜单快照同步）。公开列表（`center/public-list`）无租户，只含后两层。
+
 `deployment`：部署或启动补回部署目录进行中时为 `{ source: 'deploy' | 'restore' }`，此时应用暂不可访问；否则为 `null`。
+
+##### GET `{prefix}/app/center/menus`
+
+声明了菜单的应用及其菜单树，使用 `createUserAuthenticate` 鉴权。只含通过 `filterCenterApps`、且当前租户设置为「左菜单」展示的应用（见 `app/center/display-settings`），并按 `filterCenterMenus` 做用户级裁剪；没有声明菜单或菜单被裁空的应用不出现。
+
+**应用挂了沿用缓存**：应用状态为 `running` 或 `error`（挂了）且曾经就绪过（`options.menuSnapshot` 有记录）时都会返回，每个应用带 `status`。挂了的应用不再去拉取菜单快照，菜单沿用上一次的快照（权限树同理，已存在宿主库里，不依赖子应用在线）；入口保留，用户进入页面时由前端调用 `app/center/status` 异步检测，不正常再切换到错误状态。首次部署就失败、从未就绪过的 `error` 应用与 `stopped` 应用不出现。
+
+菜单由子应用的 `GET /open-menus.json`（`@kne/fastify-app-runtime`，源文件 `server/menus.json`）声明，顶层可选 `labelI18n`（如 `{ "zh-CN": "订单", "en-US": "Orders" }`）声明子应用自己的多语言名称；每个应用的 `labelI18n` 为租户、应用中心、子应用声明三层合并后的结果，规则见 `app/center/list`；linked 应用经 App Ops `GET /app-ops/menus` 读取。应用就绪（含启动补回）与 linked 同步时拉取并写入 `options.menuSnapshot`；从未拉取或上次失败/未声明已超过 5 分钟时，请求会懒拉取一次。拉取或校验失败时保留上一份可用 manifest，快照 `status` 为 `error`。
+
+```json
+{
+  "pageData": [
+    {
+      "name": "orders",
+      "label": "订单系统",
+      "icon": "file-id",
+      "kind": "managed",
+      "integration": "remote",
+      "baseUrl": "/app/orders",
+      "version": "1.2.0",
+      "remote": { "name": "orders", "preset": "ComponentPreset", "url": "/app/orders" },
+      "apiHost": "/app/orders",
+      "menus": [
+        { "key": "orders", "fullKey": "orders", "label": "订单", "permission": "orders:view", "permissionCode": "orders:orders:view", "component": "OrderList" },
+        {
+          "key": "report",
+          "fullKey": "report",
+          "label": "报表",
+          "children": [{ "key": "sales", "fullKey": "report/sales", "label": "销售", "permissionCode": "orders:report:sales:view", "permission": "report:sales:view", "component": "SalesReport" }]
+        }
+      ]
+    }
+  ],
+  "totalCount": 1
+}
+```
+
+manifest 规则：
+
+| 字段 | 说明 |
+|------|------|
+| `integration` | `remote`（远程组件，默认当存在 `remote` 时）/ `iframe` / `blank`；缺省且无 `remote` 为 `iframe` |
+| `remote.name` | 联邦容器名，**必须等于应用 name**；托管应用的 `remote.url` 由本插件取 `/app/{name}`，linked 应用必须提供 http(s) 绝对地址；`apiHost` 一律为 `/app/{name}`（接口经网关同源转发并换令牌，linked 应用再转到其 `apiBaseUrl`） |
+| `remote.version` | linked 应用必填：与构建时 `package.json` 的 version 一致。联邦容器名为 `{name}_{version}`（默认开启版本后缀），关联应用没有部署版本记录，宿主据此定位容器；托管应用取当前部署版本，无需填写 |
+| `menus` | 最多两级，同级 `key` 唯一（`[a-z0-9-]`）；叶子菜单 remote 需 `component`，iframe / blank 需 `path`；有 `children` 的节点不能带 `component` / `path` |
+| `permission` | 子应用权限树内的相对码；返回时附加 `permissionCode = {应用 name}:{permission}`，缺省表示开通应用即可见 |
+| `menus[].icon` | 可选，原样透传给宿主。约定：含 `/` 或 `.` 视为图片地址（相对地址按 `remote.url` / `baseUrl` 解析，推荐单色 SVG，宿主用 mask 按菜单激活态着色，跨域时需 CORS 放行）；否则视为 iconfont type；子菜单未声明时沿用父级，均未声明用宿主默认图标 |
+
+`version` 为当前部署版本号，宿主据此判断是否需要重载 `remoteEntry.js`。
+
+##### GET `{prefix}/app/center/display-settings`
+
+当前租户可见的应用及其展示方式（运行中，或挂了但曾经就绪过，带 `status`），使用 `createUserAuthenticate` 鉴权。默认读取当前登录租户（由 `getTenantId` 决定）；传 `tenantId` 查询参数且 `canManageDisplay` 放行时（超级管理员的租户详情页），读取该租户的设置并列出全部此类应用。
+
+```json
+{
+  "pageData": [
+    { "name": "orders", "label": "订单系统", "kind": "managed", "labelI18n": { "en-US": "Orders" }, "defaultLabelI18n": { "zh-CN": "订单", "en-US": "Orders (default)" }, "supportsMenu": true, "menuCount": 2, "displayMode": "menu", "configured": true, "menuStatus": "ok", "menuError": null },
+    { "name": "plain", "label": "无菜单", "labelI18n": {}, "defaultLabelI18n": {}, "kind": "managed", "supportsMenu": false, "menuCount": 0, "displayMode": "center", "configured": false, "menuStatus": "none", "menuError": null }
+  ],
+  "totalCount": 2
+}
+```
+
+`displayMode` 为生效值：没有可展示菜单的应用恒为 `center`；声明了菜单且租户未设置时取 `defaultDisplayMode`（`configured: false`）。设置为 `menu` 的应用出现在 `app/center/menus` 并从 `app/center/list` 隐藏，设置为 `center` 反之。`labelI18n` 是该租户为应用配置的多语言名称（没有配置为 `{}`），`defaultLabelI18n` 是不含租户配置的默认多语言名称（应用中心配置覆盖子应用声明，没有为 `{}`），租户编辑名称时可作占位参考；`label` 始终是应用本身的默认名称。
+
+##### POST `{prefix}/app/center/display-settings/save`
+
+修改某租户某应用的展示方式与多语言名称。使用 `createUserAuthenticate` 鉴权，请求体须带 `tenantId`，并须 `canManageDisplay({ tenantId })` 放行（未配置或返回 falsy 为 403；缺少 `tenantId` 为 400）。
+
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| name | string | 是 | 应用 slug；不存在或当前租户不可见 404 |
+| displayMode | string | 否 | `center` 或 `menu`；应用没有声明可展示菜单时设为 `menu` 返回 400 |
+| labelI18n | object | 否 | 该租户下该应用的多语言名称，如 `{ "en-US": "Orders" }`；整体替换，值为空的语言被移除，传 `{}` 清除。语言码须形如 `zh-CN` / `en-US`，名称最长 100 字符，否则 400 |
+
+`displayMode` 与 `labelI18n` 至少传一项，只更新传入的项（只传 `labelI18n` 不会把展示方式记为「已设置」）。按 `(tenantId, appName)` 保存到 `appTenantDisplay` 表；删除应用时一并清理。返回 `{ name, displayMode, labelI18n }`，`displayMode` 未设置过为 `null`。
+
+租户配置的名称与应用中心配置、子应用声明合并后，随 `app/center/list` 与 `app/center/menus` 的每个应用以 `labelI18n` 下发（仅配置过的应用才有，且只含当前登录租户的配置）：前端按用户当前语言取 `labelI18n[语言]`，没有则显示 `label`。服务端不按请求语言替换 `label`，这样用户切换语言时无需重新请求列表。语言范围由调用方决定，通常取租户的 `supportLanguage`。
+
+##### GET `{prefix}/app/center/status`
+
+检测应用当前是否可用，供嵌入组件进入页面后异步调用，使用 `createUserAuthenticate` 鉴权。同样经 `canUseApp` 把关（未配置 400，返回 falsy 403，应用不存在 404）。
+
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| name | string | 是 | 应用 slug（query） |
+
+返回 `{ name, status, healthy, message }`：`status` 不是 `running` 时直接 `healthy: false`，`message` 取应用的状态说明；`running` 时再实际探测一次（托管应用请求 `http://{upstreamHost}:{port}{healthCheckPath}`，状态码 200–499 视为可达；关联应用请求远程 `/ready`，非 2xx 或回了 HTML 视为不可达），超时 3 秒，进程已死但状态还没同步过来的情况也能识别。探测不会改动应用的 `status`，状态仍由原有的进程对账与关联应用定时同步维护。
+
+##### POST `{prefix}/app/center/token`
+
+以当前登录用户身份签发访问应用接口的令牌，供 iframe / 新窗口等需要应用自有令牌的场景使用。远程组件嵌入时直接用宿主登录令牌请求 `/app/{name}/api`，由网关换令牌（`gatewayTokenExchange`），不必调用本接口。使用 `createUserAuthenticate` 鉴权。
+
+| 参数名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| name | string | 是 | 应用 slug；不存在 404，非运行中 400 |
+
+流程：`canUseApp`（必须配置，返回 falsy 为 403）→ `issueUserAccessToken({ app, userId, tenantId })`。`tenantId` 只取自 `canUseApp` 返回的 `{ tenantId }`，请求体里不接受。返回 `{ token, expiresAt }`，`expiresAt` 取自令牌 `exp`。令牌只应放在前端内存，到期前重新申请。
 
 ##### GET `{prefix}/app/center/public-list`
 
@@ -922,7 +1034,7 @@ data: {"name":"demo","ts":1791456608533,...}
 | 方法签名 | 说明 |
 |----------|------|
 | `onReady()` | `ensureSchema` 后连接 PM2、挂 log bus、启动日志切分与负载采样定时器，并 **setImmediate** 异步执行 `recoverOnStartup`，以及一次 `rotateLogs` 与一次 `sampleLoad`（不阻塞父应用 ready） |
-| `ensureSchema()` | 宿主 `sync()` 不给已有表加列：为老库补齐后续新增列/可空约束（含 `app.kind`、`appVersion.fileId|migrationFiles|envSchema`、`appOpenApiRecord.searchText`，并把 `port/rootPath/pm2Name` 改为可空）；postgres 下将 `name/domain/pm2_name` 唯一约束改为 `WHERE deleted_at IS NULL` 部分唯一索引（软删后可同名重建），可重复执行；插件 `after` 与 `onReady` 都会调用。离线补齐见包内 `sql/host-upgrade-linked-kind.sql`、`sql/host-upgrade-app-soft-delete-unique.sql` |
+| `ensureSchema()` | 宿主 `sync()` 不给已有表加列：为老库补齐后续新增列/可空约束（含 `app.kind|labelI18n`、`appTenantDisplay.labelI18n`、`appVersion.fileId|migrationFiles|envSchema`、`appOpenApiRecord.searchText`，并把 `port/rootPath/pm2Name`、`appTenantDisplay.displayMode` 改为可空）；postgres 下将 `name/domain/pm2_name` 唯一约束改为 `WHERE deleted_at IS NULL` 部分唯一索引（软删后可同名重建），可重复执行；插件 `after` 与 `onReady` 都会调用。离线补齐见包内 `sql/host-upgrade-linked-kind.sql`、`sql/host-upgrade-app-soft-delete-unique.sql` |
 | `recoverOnStartup()` | 两路并行：部署目录完好的应用立即 `reconcile`；目录缺失的应用逐个 `restoreArtifact`（需重装依赖，较慢），每补完一个即单独 `syncStatus` 并按需拉起；补不回且原为 `running`/`deploying` 的标记 `error`；两路结束后 `pruneAllVersionArtifacts`。返回 `{ reconciled, restored, pruned }` |
 | `onClose()` | 停止切分与采样定时器并等待进行中的任务，断开 bus / PM2（由插件 `onClose` 调用） |
 | `rotateLogs({ now? })` | 立即执行一轮切分 + 压缩 + 保留清理；返回本轮切分的 `[{ name, stream, fileName, reason }]`，`reason` 为 `size` / `daily` |
@@ -996,11 +1108,26 @@ data: {"name":"demo","ts":1791456608533,...}
 | 机制 | 说明 |
 |------|------|
 | 路由优先级 | 管理 API（`prefix`）不进网关；先 domain 匹配，再 path 前缀匹配 |
+| 关联应用 | linked 应用转发到 `options.apiBaseUrl`（缺省 `baseUrl`），去掉 `/app/{name}` 前缀；不转发宿主 `Cookie`；WebSocket 同样转到该地址 |
+| 状态复查 | linked 应用为 `error` 时先按需复查一次（见 `linkRecheckIntervalMs`），恢复则直接转发，仍失败返回 503 |
+| 令牌交换 | 见 `gatewayTokenExchange`：宿主登录令牌换成该应用的用户令牌；已是该应用 `aud` 的令牌、无法识别的令牌原样转发 |
 | 应用未运行 | 命中已存在但非 `running` 的应用时返回 503（`Cache-Control: no-store`、`Retry-After`）：浏览器 `GET`/`HEAD` 且 `Accept` 含 `text/html` 返回状态说明页（`deploying` 每 5 秒自动刷新），其余请求返回 JSON `{ statusCode, error, message, appName, appStatus }` |
 | 应用不存在 | `/app/{name}` 下找不到应用时返回 404「应用不存在」页（带返回首页）或 JSON（`appStatus: 'missing'`）；`pathPrefix` 之外以及未绑定的域名仍交给宿主路由 |
 | Location | 相对路径前缀补上 `/app/{name}` |
 | Set-Cookie | `Path=/` 改为 `Path=/app/{name}` |
 | Body | 对文本类 Content-Type，将 `"/static/`、`"/api/`、`"/account/` 等前缀改写；有 `content-encoding` 时跳过；JS 脚本与 `text/event-stream`（SSE 不结束的流）原样流式透传 |
+
+##### 应用挂了时的缓存
+
+菜单与权限都是「就绪时拉取、之后读缓存」，子应用挂了不影响租户侧使用它们：
+
+| 数据 | 缓存位置 | 应用挂了时 |
+|------|----------|-----------|
+| 菜单 | `options.menuSnapshot`（应用就绪与 linked 同步时拉取） | 拉取失败保留上一份可用 manifest；应用不在运行中时不再拉取，`app/center/menus` 与 `app/center/display-settings` 对「挂了但曾经就绪过」的应用继续返回，带 `status` |
+| 关联应用权限树 | `options.permissionTree`（同步成功时写入） | 同步失败不覆盖；并用它重新触发 `onPermissionsSynced`，让宿主重启时租户权限源（内存）也能恢复，不因应用挂了丢失权限 |
+| 托管应用权限 | 随应用注册写入宿主 OIDC 应用注册表 | 不依赖应用在线 |
+
+进入应用页面时，前端调用 `app/center/status` 异步检测，正常什么都不做，不正常才切换到错误状态。应用中心卡片与公开列表仍只含运行中的应用。
 
 ##### 日志切分与归档
 

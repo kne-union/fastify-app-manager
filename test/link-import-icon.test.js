@@ -9,9 +9,19 @@ const { createMockPm2, installMockPm2, uninstallMockPm2 } = require('./helpers/m
 const PLATFORM_ORIGIN = 'http://platform.test';
 const PNG = Buffer.from('89504e470d0a1a0a', 'hex');
 
+let activateBodies = [];
+let activateData = { ok: true };
+
+const readBody = req =>
+  new Promise(resolve => {
+    let raw = '';
+    req.on('data', chunk => (raw += chunk));
+    req.on('end', () => resolve(raw ? JSON.parse(raw) : {}));
+  });
+
 const startRemote = () =>
   new Promise(resolve => {
-    const server = http.createServer((req, res) => {
+    const server = http.createServer(async (req, res) => {
       const send = (type, body) => {
         res.writeHead(200, { 'content-type': type });
         res.end(body);
@@ -20,7 +30,8 @@ const startRemote = () =>
         return send('application/json', JSON.stringify({ data: { label: '远程应用', entries: [], permissions: [] } }));
       }
       if (req.url === '/app-ops/link/activate') {
-        return send('application/json', JSON.stringify({ data: { ok: true } }));
+        activateBodies.push(await readBody(req));
+        return send('application/json', JSON.stringify({ data: activateData }));
       }
       if (req.url === '/favicon.ico') {
         return send('image/x-icon', PNG);
@@ -39,6 +50,7 @@ describe('link import icon', function () {
   let remote;
   let saved;
   let saveIconFile;
+  let oidcRegistered;
 
   const buildInstallKey = (appName, extra = {}) =>
     Buffer.from(
@@ -73,7 +85,11 @@ describe('link import icon', function () {
       return 'saved-icon-id';
     };
 
+    activateBodies = [];
+    activateData = { ok: true };
+    oidcRegistered = [];
     fastify = Fastify({ logger: false });
+    fastify.decorate('oidc', { services: { app: { register: async body => oidcRegistered.push(body), findByCode: () => null } } });
     await fastify.register(require('@fastify/sensible'));
     await fastify.register(require('@kne/fastify-sequelize'), {
       db: { dialect: 'sqlite', storage: path.join(appsRoot, 'test.sqlite'), logging: false }
@@ -131,5 +147,30 @@ describe('link import icon', function () {
     expect(res.statusCode).to.equal(200);
     const app = await fastify.appManager.models.app.findOne({ where: { name: 'icon-fail' } });
     expect(app.icon).to.equal(null);
+  });
+
+  it('远程回传 tenantSyncUri：以 independent + permissionRoot 登记进 OIDC 应用注册表', async () => {
+    activateData = { ok: true, tenantSyncUri: 'http://remote.test/api/oidc/tenant-sync' };
+    const res = await importApp({ installKey: buildInstallKey('sync-remote'), icon: 'icon-id' });
+    expect(res.statusCode).to.equal(200);
+    expect(activateBodies[0].appCode).to.equal('sync-remote');
+    expect(oidcRegistered).to.deep.equal([
+      {
+        serviceClientId: 'scid',
+        code: 'sync-remote',
+        name: '远程应用',
+        tenantMode: 'independent',
+        clientId: 'cid',
+        resource: 'aud',
+        permissionRoot: true,
+        tenantSyncUri: 'http://remote.test/api/oidc/tenant-sync'
+      }
+    ]);
+  });
+
+  it('远程未回传 tenantSyncUri（旧版 runtime）：不登记', async () => {
+    const res = await importApp({ installKey: buildInstallKey('old-remote'), icon: 'icon-id' });
+    expect(res.statusCode).to.equal(200);
+    expect(oidcRegistered).to.have.length(0);
   });
 });

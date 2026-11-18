@@ -4,10 +4,71 @@ const { Readable } = require('node:stream');
 const httpProxy = require('http-proxy');
 const { rewriteLocation, rewriteSetCookiePath, shouldRewriteBody, rewriteBody, tagEtag, restoreConditionalHeaders } = require('../utils/pathRewrite');
 const { wantsHtml, renderUnavailablePage, getStatusText } = require('../utils/unavailablePage');
+const { isLinked, linkedApiBaseUrl } = require('../utils/appKind');
+
+const bearerToken = request => {
+  const match = /^Bearer\s+(\S+)$/i.exec(request.headers.authorization || '');
+  return match ? match[1] : null;
+};
+
+const decodeJwtPayload = token => {
+  try {
+    return JSON.parse(Buffer.from(String(token).split('.')[1] || '', 'base64url').toString('utf8'));
+  } catch (e) {
+    return null;
+  }
+};
 
 module.exports = fp(async (fastify, options) => {
   const ns = options.name;
   const pathPrefix = options.pathPrefix.replace(/\/$/, '') || '/app';
+
+  const upstreamOf = app => (isLinked(app) ? linkedApiBaseUrl(app) : `http://${options.upstreamHost}:${app.port}`);
+
+  // linked 应用健康检查失败后状态为 error：访问时按需复查，子应用重启恢复后不必等定时同步
+  const recheck = async app => {
+    const link = fastify[ns].services?.link;
+    return app && isLinked(app) && app.status === 'error' && link?.recheckUnhealthy ? link.recheckUnhealthy(app) : app;
+  };
+
+  const canExchange = () => options.gatewayTokenExchange !== false && typeof options.canUseApp === 'function' && typeof options.issueUserAccessToken === 'function';
+
+  const runUserAuthenticate = async (request, reply) => {
+    for (const hook of options.createUserAuthenticate() || []) {
+      await hook(request, reply);
+    }
+  };
+
+  /**
+   * 宿主前端把登录用户令牌发到 /app/{name} 时，换成该应用 audience 的用户令牌再转发，子应用只认自己的 audience。
+   * 已是该应用的令牌、或不是宿主登录令牌的，原样转发由子应用自行校验。
+   */
+  const exchangeAuthorization = async (request, reply, app) => {
+    const token = bearerToken(request);
+    if (!token || !canExchange()) {
+      return null;
+    }
+    const payload = decodeJwtPayload(token);
+    if (!payload) {
+      return null;
+    }
+    const appAudienceSuffix = `${pathPrefix}/${app.name}/api`;
+    if ([].concat(payload.aud || []).some(aud => String(aud).replace(/\/+$/, '').endsWith(appAudienceSuffix))) {
+      return null;
+    }
+    try {
+      await runUserAuthenticate(request, reply);
+    } catch (e) {
+      return null;
+    }
+    if (!request.userInfo?.id) {
+      return null;
+    }
+    // 子应用会因权限变更吊销已签发的令牌，网关无从感知，所以不缓存：每次请求经 canUseApp 把关后现签
+    const { menu } = fastify[ns].services;
+    const issued = await menu.issueAppToken(await menu.resolveAppUse({ name: app.name, request }));
+    return `Bearer ${issued.token}`;
+  };
 
   const pathMatcher = new RegExp(`^${pathPrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/([^/?#]+)`);
 
@@ -24,8 +85,14 @@ module.exports = fp(async (fastify, options) => {
     const rawUrl = request.raw.url || '/';
     const targetPath = stripPrefix ? stripMountPrefix(rawUrl, app.name) : rawUrl;
 
-    const dest = `http://${options.upstreamHost}:${app.port}${targetPath}`;
+    const upstream = upstreamOf(app);
+    if (!upstream) {
+      return replyUnavailable(request, reply, { name: app.name, status: 'stopped' });
+    }
+    const dest = `${upstream}${targetPath}`;
     const mountPrefix = `${pathPrefix}/${app.name}`;
+    const linked = isLinked(app);
+    const authorization = await exchangeAuthorization(request, reply, app);
 
     const tracker = fastify[ns].requestMetrics?.begin(app.name);
     if (tracker) {
@@ -48,6 +115,13 @@ module.exports = fp(async (fastify, options) => {
       rewriteRequestHeaders: (req, headers) => {
         const next = stripPrefix ? restoreConditionalHeaders(headers) : { ...headers };
         delete next['content-length'];
+        if (authorization) {
+          next.authorization = authorization;
+        }
+        // 关联应用不同源，宿主 cookie 不能带过去
+        if (linked) {
+          delete next.cookie;
+        }
         return next;
       },
       rewriteHeaders: headers => {
@@ -128,7 +202,7 @@ module.exports = fp(async (fastify, options) => {
     }
 
     const host = request.headers.host;
-    const byHost = await services.app.findByHost(host, { running: false });
+    const byHost = await recheck(await services.app.findByHost(host, { running: false }));
     if (byHost) {
       return byHost.status === 'running' ? proxyToApp(request, reply, byHost, { stripPrefix: false }) : replyUnavailable(request, reply, byHost);
     }
@@ -136,7 +210,7 @@ module.exports = fp(async (fastify, options) => {
     const match = url.match(pathMatcher);
     if (match) {
       const appName = decodeName(match[1]);
-      const app = await services.app.findByPathName(appName, { running: false });
+      const app = await recheck(await services.app.findByPathName(appName, { running: false }));
       if (app) {
         return app.status === 'running' ? proxyToApp(request, reply, app, { stripPrefix: true }) : replyUnavailable(request, reply, app);
       }
@@ -162,7 +236,7 @@ module.exports = fp(async (fastify, options) => {
     if (!services?.app) {
       return null;
     }
-    const byHost = await services.app.findByHost(req.headers.host, { running: false });
+    const byHost = await recheck(await services.app.findByHost(req.headers.host, { running: false }));
     if (byHost) {
       return { app: byHost, targetPath: url };
     }
@@ -171,7 +245,7 @@ module.exports = fp(async (fastify, options) => {
       return null;
     }
     const appName = decodeName(match[1]);
-    const app = await services.app.findByPathName(appName, { running: false });
+    const app = await recheck(await services.app.findByPathName(appName, { running: false }));
     return { app: app || { name: appName, status: 'missing' }, targetPath: stripMountPrefix(url, appName) };
   };
 
@@ -195,8 +269,15 @@ module.exports = fp(async (fastify, options) => {
       return rejectUpgrade(socket, app.status === 'missing' ? 404 : 503);
     }
 
+    const upstream = upstreamOf(app);
+    if (!upstream) {
+      return rejectUpgrade(socket, 503);
+    }
     req.url = targetPath;
-    wsProxy.ws(req, socket, head, { target: `http://${options.upstreamHost}:${app.port}` }, error => {
+    if (isLinked(app)) {
+      delete req.headers.cookie;
+    }
+    wsProxy.ws(req, socket, head, { target: upstream }, error => {
       fastify.log.warn({ err: error, app: app.name }, 'websocket upgrade proxy failed');
       rejectUpgrade(socket, 502);
     });

@@ -73,7 +73,21 @@ module.exports = fp(
         getPermissionRootCodes: null,
         /** async ({ apps, request }) => apps，登录用户应用中心列表的裁剪钩子（如按租户已开通权限隐藏应用）；返回保留的应用数组 */
         filterCenterApps: null,
+        /** async ({ menus, app, request }) => menus，登录用户菜单列表的用户级裁剪钩子（如按权限码隐藏菜单）；返回保留的菜单数组 */
+        filterCenterMenus: null,
+        /** async ({ app, request }) => boolean | { tenantId }，签发应用访问令牌前的把关钩子；未配置时 POST .../app/center/token 返回 400 */
+        canUseApp: null,
+        /** 网关 /app/{name} 收到宿主登录令牌时经 canUseApp 把关后换成子应用令牌再转发（需同时配置 canUseApp 与 issueUserAccessToken）；false 关闭 */
+        gatewayTokenExchange: true,
+        /** async ({ request }) => string | null，当前请求所属租户 id，用于按租户保存应用展示方式；不传则所有用户共用一份设置 */
+        getTenantId: null,
+        /** async ({ request }) => boolean，是否允许修改当前租户的应用展示方式（如租户管理员）；未配置时 POST .../app/center/display-settings/save 返回 403 */
+        canManageDisplay: null,
+        /** 租户未设置时应用的默认展示方式：center 应用中心 | menu 左菜单（仅对声明了菜单的应用生效） */
+        defaultDisplayMode: 'center',
         linkSyncIntervalMs: 5 * 60 * 1000,
+        /** linked 应用健康检查失败后，网关与列表访问时按需复查的最小间隔（毫秒） */
+        linkRecheckIntervalMs: 15 * 1000,
         linkProxyTimeoutMs: 15000,
         /** async ({ fileId, name, version, request }) => Buffer，版本上传传 fileId 时读取宿主文件 */
         resolveVersionFile: null,
