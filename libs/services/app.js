@@ -216,22 +216,30 @@ module.exports = fp(async (fastify, options) => {
       normalizedOptions.homePath = '/';
     }
 
-    const app = await models.app.create({
-      name,
-      label,
-      kind: KIND_MANAGED,
-      domain: domain || null,
-      icon: icon || null,
-      description: description || null,
-      env: omitSystemEnv(env, options.systemEnvKeys),
-      pm2Config: pm2Config || {},
-      options: normalizedOptions,
-      port,
-      status: 'idle',
-      rootPath,
-      pm2Name: createPm2Name(options.hostName, name),
-      message: null
-    });
+    let app;
+    try {
+      app = await models.app.create({
+        name,
+        label,
+        kind: KIND_MANAGED,
+        domain: domain || null,
+        icon: icon || null,
+        description: description || null,
+        env: omitSystemEnv(env, options.systemEnvKeys),
+        pm2Config: pm2Config || {},
+        options: normalizedOptions,
+        port,
+        status: 'idle',
+        rootPath,
+        pm2Name: createPm2Name(options.hostName, name),
+        message: null
+      });
+    } catch (e) {
+      if (e.name === 'SequelizeUniqueConstraintError') {
+        httpError(409, `app ${name} already exists`);
+      }
+      throw e;
+    }
     return toPublicApp(app);
   };
 
