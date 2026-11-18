@@ -5,7 +5,6 @@ module.exports = ({ DataTypes }) => {
       name: {
         type: DataTypes.STRING,
         allowNull: false,
-        unique: true,
         comment: '应用 slug / appId'
       },
       label: {
@@ -22,7 +21,6 @@ module.exports = ({ DataTypes }) => {
       domain: {
         type: DataTypes.STRING,
         allowNull: true,
-        unique: true,
         comment: '绑定域名 Host；linked 必须为空'
       },
       icon: {
@@ -77,7 +75,6 @@ module.exports = ({ DataTypes }) => {
       pm2Name: {
         type: DataTypes.STRING,
         allowNull: true,
-        unique: true,
         comment: 'PM2 进程名；linked 可空'
       },
       message: {
@@ -88,7 +85,14 @@ module.exports = ({ DataTypes }) => {
     },
     options: {
       comment: '托管应用',
-      indexes: [{ fields: ['status'] }, { fields: ['domain'] }, { fields: ['kind'] }]
+      indexes: [
+        { fields: ['status'] },
+        { fields: ['kind'] },
+        // 软删行不占唯一键：删除后可同名重建（须配合 ensureSchema / 迁移丢掉旧的 *_key）
+        { name: 'app_name_active_uk', unique: true, fields: ['name'], where: { deleted_at: null } },
+        { name: 'app_domain_active_uk', unique: true, fields: ['domain'], where: { deleted_at: null } },
+        { name: 'app_pm2_name_active_uk', unique: true, fields: ['pm2_name'], where: { deleted_at: null } }
+      ]
     }
   };
 };

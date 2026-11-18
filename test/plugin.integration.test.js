@@ -321,6 +321,19 @@ describe('plugin integration', function () {
 
   it('linked entries keep relative path and do not stack baseUrl on save/center', async () => {
     const dirtyPath = '/http://localhost:3041/http://localhost:3041/tenant';
+    // 后台会按远程 /ready 对齐 linked 应用状态；用本地假远程返回健康，避免依赖外部端口（CI 上无服务会被置为 error 而从中心列表消失）
+    const remote = http.createServer((req, res) => {
+      if (req.url === '/ready') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end('{"ok":true}');
+        return;
+      }
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end('{}');
+    });
+    remote.unref();
+    await new Promise(resolve => remote.listen(0, '127.0.0.1', resolve));
+    const apiBaseUrl = `http://127.0.0.1:${remote.address().port}`;
     await fastify.appManager.models.app.create({
       name: 'remote-train',
       label: '培训系统',
@@ -334,7 +347,7 @@ describe('plugin integration', function () {
       options: {
         kind: 'linked',
         baseUrl: 'http://localhost:3041',
-        apiBaseUrl: 'http://localhost:8041',
+        apiBaseUrl,
         entries: [{ label: '首页', path: dirtyPath, showInCenter: true }],
         isPublic: true
       },
@@ -358,6 +371,7 @@ describe('plugin integration', function () {
 
     const again = await fastify.inject({ method: 'GET', url: '/api/v1/app-manager/app/center/list' });
     expect(again.json().pageData.find(i => i.name === 'remote-train').entries[0].url).to.equal('http://localhost:3041/tenant');
+    await new Promise(resolve => remote.close(resolve));
   });
 
   it('should upload version deploy lifecycle and read logs', async () => {

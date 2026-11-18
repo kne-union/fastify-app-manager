@@ -87,6 +87,37 @@ module.exports = fp(async (fastify, options) => {
         await queryInterface.addIndex(table, [kindAttr.field], { name: indexName });
       }
     }
+
+    // 软删不占唯一键：去掉字段级 UNIQUE 约束，改为 WHERE deleted_at IS NULL 的部分唯一索引。
+    // sequelize sync 不会 DROP 旧 *_key；须在此幂等迁移（仅 postgres；MySQL 不支持部分索引）。
+    const dialect = models.app.sequelize.getDialect();
+    if (dialect === 'postgres') {
+      const qi = models.app.sequelize.getQueryInterface();
+      const quoted = `"${String(tableName).replace(/"/g, '""')}"`;
+      for (const col of ['name', 'domain', 'pm2_name']) {
+        await models.app.sequelize.query(`ALTER TABLE ${quoted} DROP CONSTRAINT IF EXISTS "${tableName}_${col}_key"`);
+      }
+      // 顺带去掉旧的非唯一 domain 索引（若仍存在）
+      await models.app.sequelize.query(`DROP INDEX IF EXISTS "${tableName}_domain"`);
+
+      const activeIndexes = [
+        { name: `${tableName}_name_active_uk`, fields: ['name'] },
+        { name: `${tableName}_domain_active_uk`, fields: ['domain'] },
+        { name: `${tableName}_pm2_name_active_uk`, fields: ['pm2_name'] }
+      ];
+      const indexes = await qi.showIndex(table);
+      for (const item of activeIndexes) {
+        const exists = (indexes || []).some(row => row.name === item.name);
+        if (exists) {
+          continue;
+        }
+        await qi.addIndex(table, item.fields, {
+          name: item.name,
+          unique: true,
+          where: { deleted_at: null }
+        });
+      }
+    }
   };
 
   const onReady = async () => {
