@@ -131,8 +131,9 @@ const filenameOf = (url, mimetype) => {
 };
 
 /**
- * 从远程应用前端站点获取图标：首页 <link rel=icon/apple-touch-icon>、web manifest icons、/favicon.ico 全部作为候选，
- * 逐个下载后读真实像素尺寸，取最大的一张（站点没声明 sizes 也能比出大小）；尺寸相同按 touch > icon > manifest > favicon.ico，普通图优先于 maskable。
+ * 从远程应用前端站点获取图标：首页 <link rel=icon/apple-touch-icon>、web manifest icons（首页没声明时探测 /manifest.json）、
+ * /apple-touch-icon.png、/favicon.ico 全部作为候选，
+ * 逐个下载后读真实像素尺寸，取最大的一张（站点没声明 sizes 也能比出大小）；尺寸相同按 touch > icon > manifest > 约定路径 > favicon.ico，普通图优先于 maskable。
  * 只接受 image/* 且不超过 1MB 的响应（SPA 对未知路径回落 HTML 的会被丢弃）。
  * 失败返回 null，不抛错。
  */
@@ -148,24 +149,26 @@ const discoverRemoteIcon = async ({ baseUrl, timeoutMs = 5000, fetchImpl = fetch
 
   const candidates = [];
   const pageUrl = `${base}/`;
+  let declaredManifestUrl = null;
   try {
     const page = await request(pageUrl, 'text/html');
     if (page) {
       const { icons, manifestUrl } = parseHtmlIcons(await page.text(), pageUrl);
       candidates.push(...icons);
-      if (manifestUrl) {
-        try {
-          const manifestRes = await request(manifestUrl, 'application/manifest+json,application/json');
-          candidates.push(...parseManifestIcons(manifestRes ? await manifestRes.json() : null, manifestUrl));
-        } catch (e) {
-          // manifest 取不到不影响后续候选
-        }
-      }
+      declaredManifestUrl = manifestUrl;
     }
   } catch (e) {
-    // 首页取不到，退回 /favicon.ico
+    // 首页取不到，仍按约定路径探测
   }
-  candidates.push({ url: `${base}/favicon.ico`, size: 0 });
+  // 首页没声明 manifest（老页面、或首页取不到）时按约定路径 /manifest.json 探测：站点常把 manifest 放在根路径却没在 HTML 里引用
+  const manifestUrl = declaredManifestUrl || `${base}/manifest.json`;
+  try {
+    const manifestRes = await request(manifestUrl, 'application/manifest+json,application/json');
+    candidates.push(...parseManifestIcons(manifestRes ? await manifestRes.json() : null, manifestUrl));
+  } catch (e) {
+    // manifest 取不到、或被 SPA 回落成 HTML 无法解析，不影响后续候选
+  }
+  candidates.push({ url: `${base}/apple-touch-icon.png`, size: 0 }, { url: `${base}/favicon.ico`, size: 0 });
 
   const unique = [...new Map(candidates.map(item => [item.url, item])).values()].slice(0, MAX_CANDIDATES);
   const fetched = await Promise.all(
