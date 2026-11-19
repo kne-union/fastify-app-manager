@@ -703,13 +703,13 @@ manifest 规则：
 | 字段 | 说明 |
 |------|------|
 | `integration` | `remote`（远程组件，默认当存在 `remote` 时）/ `iframe` / `blank`；缺省且无 `remote` 为 `iframe` |
-| `remote.name` | 联邦容器名，**必须等于应用 name**；托管应用的 `remote.url` 由本插件取 `/app/{name}`，linked 应用必须提供 http(s) 绝对地址；`apiHost` 一律为 `/app/{name}`（接口经网关同源转发并换令牌，linked 应用再转到其 `apiBaseUrl`） |
-| `remote.version` | linked 应用必填：与构建时 `package.json` 的 version 一致。联邦容器名为 `{name}_{version}`（默认开启版本后缀），关联应用没有部署版本记录，宿主据此定位容器；托管应用取当前部署版本，无需填写 |
+| `remote.name` | 联邦容器名，**必须等于应用 name**；`apiHost` 一律为 `/app/{name}`（接口经网关同源转发并换令牌，linked 应用再转到其 `apiBaseUrl`） |
+| `remote.url` / `remote.version` | **清单里不用声明**（声明了也会被忽略）。托管应用：`url` 取 `/app/{name}`，`version` 取当前部署版本；linked 应用：拉取菜单快照时读取其前端站点（`baseUrl`）的 `GET /remote-module-config.json`，取其 `url`（http(s) 绝对地址）与 `version`（联邦容器名 `{name}_{version}`）。线上由 `@kne/fastify-app-runtime` 提供（内容来自构建产物），本地 `craco start` 由 `@kne/modules-dev` 提供。接口不存在或内容不合法时，快照为 error 并给出原因 |
 | `menus` | 最多两级，同级 `key` 唯一（`[a-z0-9-]`）；叶子菜单 remote 需 `component`，iframe / blank 需 `path`；有 `children` 的节点不能带 `component` / `path` |
 | `permission` | 子应用权限树内的相对码；返回时附加 `permissionCode = {应用 name}:{permission}`，缺省表示开通应用即可见 |
 | `menus[].icon` | 可选，原样透传给宿主。约定：含 `/` 或 `.` 视为图片地址（相对地址按 `remote.url` / `baseUrl` 解析，推荐单色 SVG，宿主用 mask 按菜单激活态着色，跨域时需 CORS 放行）；否则视为 iconfont type；子菜单未声明时沿用父级，均未声明用宿主默认图标 |
 
-`version` 为当前部署版本号，宿主据此判断是否需要重载 `remoteEntry.js`。
+`version` 为当前部署版本号（linked 应用为其 `/remote-module-config.json` 的 `version`），宿主据此判断是否需要重载 `remoteEntry.js`。
 
 ##### GET `{prefix}/app/center/display-settings`
 

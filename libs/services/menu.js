@@ -2,6 +2,7 @@ const fp = require('fastify-plugin');
 const { isLinked, linkedBaseUrl, linkedApiBaseUrl, KIND_LINKED, KIND_MANAGED } = require('../utils/appKind');
 const { isServed, SERVED_STATUSES } = require('../utils/appAvailability');
 const { normalizeMenuManifest, flattenLeafMenus } = require('../utils/menuManifest');
+const { fetchRemoteModuleConfig } = require('../utils/remoteModuleConfig');
 const { hasLabels, parseLabelI18n, mergeLabelI18n, appDefaultLabels } = require('../utils/labelI18n');
 
 /** 拉取失败或没有菜单声明的应用，间隔多久再尝试一次懒拉取 */
@@ -75,10 +76,16 @@ module.exports = fp(async (fastify, options) => {
       if (raw == null) {
         return await saveSnapshot(app, { status: 'none', fetchedAt, manifest: null });
       }
-      const { ok, manifest, errors } = normalizeMenuManifest(raw, { appName: app.name, kind: isLinked(app) ? KIND_LINKED : KIND_MANAGED });
+      const { ok, manifest, errors } = normalizeMenuManifest(raw, { appName: app.name });
       if (!ok) {
         fastify.log.warn({ app: app.name, errors }, 'app menus manifest invalid');
         return await saveSnapshot(app, { status: 'error', fetchedAt, error: errors.join('；'), manifest: previous?.manifest || null });
+      }
+      if (isLinked(app) && manifest.integration === 'remote') {
+        // 关联应用没有部署记录：远程组件地址与版本（联邦容器名 {name}_{version}）读前端站点（baseUrl）的 /remote-module-config.json；
+        // 线上由 fastify-app-runtime 提供，本地 craco start 由 @kne/modules-dev 提供
+        const { url, version } = await fetchRemoteModuleConfig({ baseUrl: linkedBaseUrl(app), timeoutMs: FETCH_TIMEOUT_MS });
+        manifest.remote = Object.assign({}, manifest.remote, { url, version });
       }
       return await saveSnapshot(app, { status: 'ok', fetchedAt, manifest });
     } catch (e) {
