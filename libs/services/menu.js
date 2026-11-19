@@ -1,7 +1,7 @@
 const fp = require('fastify-plugin');
 const { isLinked, linkedBaseUrl, linkedApiBaseUrl, KIND_LINKED, KIND_MANAGED } = require('../utils/appKind');
 const { isServed, SERVED_STATUSES } = require('../utils/appAvailability');
-const { normalizeMenuManifest, flattenLeafMenus } = require('../utils/menuManifest');
+const { normalizeMenuManifest, flattenLeafMenus, proxyMenuIcons } = require('../utils/menuManifest');
 const { fetchRemoteModuleConfig } = require('../utils/remoteModuleConfig');
 const { hasLabels, parseLabelI18n, mergeLabelI18n, appDefaultLabels } = require('../utils/labelI18n');
 
@@ -136,7 +136,8 @@ module.exports = fp(async (fastify, options) => {
       baseUrl: base,
       // 托管应用取当前部署版本；关联应用没有部署记录，取清单声明的 remote.version
       version: linked ? manifest.remote?.version || null : await currentVersionOf(app),
-      menus: manifest.menus
+      // 关联应用的菜单图标改走网关（同源），见 proxyMenuIcons
+      menus: linked && Array.isArray(manifest.menus) ? proxyMenuIcons(manifest.menus, mountPrefix(app.name)) : manifest.menus
     };
     // 应用名称多语言：租户配置 > 应用中心配置 > 子应用 manifest 声明
     const labels = mergeLabelI18n(manifest.labelI18n, app.labelI18n, tenantLabelI18n);
