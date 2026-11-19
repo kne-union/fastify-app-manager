@@ -87,7 +87,12 @@ describe('discoverRemoteIcon', () => {
       },
       '/manifest.json': {
         type: 'application/json',
-        body: JSON.stringify({ icons: [{ src: '/big-512.png', sizes: '512x512' }, { src: '/mask-512.png', sizes: '512x512', purpose: 'maskable' }] })
+        body: JSON.stringify({
+          icons: [
+            { src: '/big-512.png', sizes: '512x512' },
+            { src: '/mask-512.png', sizes: '512x512', purpose: 'maskable' }
+          ]
+        })
       },
       '/favicon-192.png': { type: 'image/png', body: pngOf(192) },
       '/touch.png': { type: 'image/png', body: pngOf(180) },
@@ -114,12 +119,77 @@ describe('discoverRemoteIcon', () => {
       '/': { type: 'text/html', body: '<link rel="manifest" href="/manifest.json">' },
       '/manifest.json': {
         type: 'application/json',
-        body: JSON.stringify({ icons: [{ src: '/any-192.png', sizes: '192x192' }, { src: '/mask-512.png', sizes: '512x512', purpose: 'maskable' }] })
+        body: JSON.stringify({
+          icons: [
+            { src: '/any-192.png', sizes: '192x192' },
+            { src: '/mask-512.png', sizes: '512x512', purpose: 'maskable' }
+          ]
+        })
       },
       '/any-192.png': { type: 'image/png', body: pngOf(192) },
       '/mask-512.png': { type: 'image/png', body: pngOf(512) }
     });
     expect((await discoverRemoteIcon({ baseUrl: site.baseUrl })).filename).to.equal('mask-512.png');
+  });
+
+  it('首页没声明 manifest 时也探测根路径 /manifest.json，取其中最大的图标（胜过 /favicon.ico）', async () => {
+    site = await startSite({
+      '/': { type: 'text/html', body: '<html><head><title>老页面，没有任何图标声明</title></head></html>' },
+      '/manifest.json': {
+        type: 'application/manifest+json',
+        body: JSON.stringify({
+          icons: [
+            { src: 'favicon-192x192.png', sizes: '192x192', type: 'image/png' },
+            { src: 'favicon-512x512.png', sizes: '512x512', type: 'image/png' }
+          ]
+        })
+      },
+      '/favicon-192x192.png': { type: 'image/png', body: pngOf(192) },
+      '/favicon-512x512.png': { type: 'image/png', body: pngOf(512) },
+      '/favicon.ico': { type: 'image/x-icon', body: icoOf(32) }
+    });
+    const found = await discoverRemoteIcon({ baseUrl: site.baseUrl });
+    expect(found.filename).to.equal('favicon-512x512.png');
+    expect(imageSize(found.buffer, found.mimetype)).to.equal(512);
+  });
+
+  it('首页没声明时也探测约定路径 /apple-touch-icon.png', async () => {
+    site = await startSite({
+      '/': { type: 'text/html', body: '<html></html>' },
+      '/apple-touch-icon.png': { type: 'image/png', body: pngOf(180) },
+      '/favicon.ico': { type: 'image/x-icon', body: icoOf(32) }
+    });
+    const found = await discoverRemoteIcon({ baseUrl: site.baseUrl });
+    expect(found.filename).to.equal('apple-touch-icon.png');
+  });
+
+  it('首页取不到时仍探测 /manifest.json', async () => {
+    site = await startSite({
+      '/': { type: 'text/html', status: 500, body: 'error' },
+      '/manifest.json': { type: 'application/json', body: JSON.stringify({ icons: [{ src: '/m-256.png', sizes: '256x256' }] }) },
+      '/m-256.png': { type: 'image/png', body: pngOf(256) },
+      '/favicon.ico': { type: 'image/x-icon', body: icoOf(32) }
+    });
+    expect((await discoverRemoteIcon({ baseUrl: site.baseUrl })).filename).to.equal('m-256.png');
+  });
+
+  it('约定路径被 SPA 回落成 HTML 时忽略，仍退回 /favicon.ico', async () => {
+    // startSite 对未知路径（含 /manifest.json、/apple-touch-icon.png）都回 text/html
+    site = await startSite({
+      '/': { type: 'text/html', body: '<html></html>' },
+      '/favicon.ico': { type: 'image/x-icon', body: icoOf(32) }
+    });
+    expect((await discoverRemoteIcon({ baseUrl: site.baseUrl })).filename).to.equal('favicon.ico');
+  });
+
+  it('子路径 baseUrl 的约定路径相对于该子路径', async () => {
+    site = await startSite({
+      '/app/x/': { type: 'text/html', body: '<html></html>' },
+      '/app/x/manifest.json': { type: 'application/json', body: JSON.stringify({ icons: [{ src: 'big.png', sizes: '384x384' }] }) },
+      '/app/x/big.png': { type: 'image/png', body: pngOf(384) },
+      '/favicon.ico': { type: 'image/x-icon', body: icoOf(32) }
+    });
+    expect((await discoverRemoteIcon({ baseUrl: `${site.baseUrl}/app/x` })).filename).to.equal('big.png');
   });
 
   it('最后退回 /favicon.ico', async () => {
