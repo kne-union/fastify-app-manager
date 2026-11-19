@@ -59,16 +59,10 @@ describe('menu manifest 规范化', () => {
     expect(mixed.ok).to.equal(false);
   });
 
-  it('linked 应用的 remote 需要绝对 url', () => {
-    const missing = normalizeMenuManifest(remoteManifest(), { appName: 'orders', kind: 'linked' });
-    expect(missing.ok).to.equal(false);
-    const linked = remote => normalizeMenuManifest(Object.assign(remoteManifest(), { remote: Object.assign({ name: 'orders', url: 'https://x.com/' }, remote) }), { appName: 'orders', kind: 'linked' });
-    const ok = linked({ version: '1.2.3' });
-    expect(ok.ok).to.equal(true);
-    expect(ok.manifest.remote).to.include({ url: 'https://x.com', version: '1.2.3' });
-    // 联邦容器名带版本后缀，linked 必须声明合法的 remote.version
-    expect(linked({}).ok).to.equal(false);
-    expect(linked({ version: '1 2' }).ok).to.equal(false);
+  it('清单不声明 remote.url / remote.version：声明了也被忽略（地址与版本由应用中心取得）', () => {
+    const declared = normalizeMenuManifest(Object.assign(remoteManifest(), { remote: { name: 'orders', url: 'https://x.com/', version: '1.2.3' } }), { appName: 'orders' });
+    expect(declared.ok).to.equal(true);
+    expect(declared.manifest.remote).to.deep.equal({ name: 'orders', preset: 'ComponentPreset' });
   });
 
   it('manifest 顶层 labelI18n：规整后保留，空值丢弃，不合法被拒绝', () => {
@@ -94,6 +88,7 @@ describe('center menus / center token', function () {
   let upstream;
   let upstreamPort;
   let upstreamBody;
+  let remoteConfigBody;
   let tokenCalls;
 
   const startUpstream = () =>
@@ -102,6 +97,10 @@ describe('center menus / center token', function () {
         if (req.url === '/open-menus.json' && upstreamBody) {
           res.writeHead(200, { 'content-type': 'application/json' });
           return res.end(JSON.stringify(upstreamBody));
+        }
+        if (req.url === '/remote-module-config.json' && remoteConfigBody) {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          return res.end(JSON.stringify(remoteConfigBody));
         }
         res.writeHead(404, { 'content-type': 'application/json' });
         res.end('{}');
@@ -158,6 +157,7 @@ describe('center menus / center token', function () {
         { key: 'refund', label: '退款', permission: 'refund:view', component: 'RefundList' }
       ]
     };
+    remoteConfigBody = null;
     tokenCalls = [];
     await startUpstream();
   });
@@ -206,6 +206,47 @@ describe('center menus / center token', function () {
     const row = await fastify.appManager.models.app.findOne({ where: { name: 'orders' } });
     expect(row.options.menuSnapshot.status).to.equal('error');
     expect(row.options.menuSnapshot.error).to.contain('remote.name');
+  });
+
+  describe('关联应用：remote 地址与版本读 /remote-module-config.json', () => {
+    const linkedManifest = () => ({
+      integration: 'remote',
+      // 清单里不声明 url / version
+      remote: { name: 'crm' },
+      menus: [{ key: 'customer', label: '客户', permission: 'customer:view', component: 'CustomerList' }]
+    });
+
+    const createLinked = async () => {
+      await build();
+      // 菜单清单经签名通道（app-ops）读取，这里直接替换为返回清单；remote-module-config.json 走真实 HTTP
+      fastify.appManager.services.link.remoteFetch = async () => linkedManifest();
+      return fastify.appManager.models.app.create({
+        name: 'crm',
+        label: 'CRM',
+        kind: 'linked',
+        status: 'running',
+        options: { baseUrl: `http://127.0.0.1:${upstreamPort}`, linkStatus: 'paired' }
+      });
+    };
+
+    it('url 与 version 取自应用的 remote-module-config.json', async () => {
+      remoteConfigBody = { name: '@kne/crm', url: 'https://crm.example.com/', tpl: '{{url}}', version: '2.3.4' };
+      await createLinked();
+      const crm = (await getMenus()).pageData.find(item => item.name === 'crm');
+      expect(crm).to.include({ kind: 'linked', integration: 'remote', version: '2.3.4', baseUrl: 'http://127.0.0.1:' + upstreamPort });
+      expect(crm.remote).to.deep.equal({ name: 'crm', preset: 'ComponentPreset', url: 'https://crm.example.com' });
+      const row = await fastify.appManager.models.app.findOne({ where: { name: 'crm' } });
+      expect(row.options.menuSnapshot.status).to.equal('ok');
+    });
+
+    it('应用没有 remote-module-config.json：快照报错并说明原因，不出现在菜单里', async () => {
+      await createLinked();
+      const data = await getMenus();
+      expect(data.pageData.map(item => item.name)).to.not.include('crm');
+      const row = await fastify.appManager.models.app.findOne({ where: { name: 'crm' } });
+      expect(row.options.menuSnapshot.status).to.equal('error');
+      expect(row.options.menuSnapshot.error).to.contain('remote-module-config.json');
+    });
   });
 
   it('center/token：没有配置 canUseApp 时拒绝', async () => {

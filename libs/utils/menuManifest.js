@@ -4,7 +4,7 @@
  * 规范见《应用菜单集成规范》：
  * - integration：remote（远程组件，首选）/ iframe / blank（新窗口）
  * - menus 最多两级；叶子菜单 remote 需要 component，iframe / blank 需要 path
- * - remote.name 必须等于应用 slug（托管应用）；linked 应用另需 remote.url
+ * - remote.name 必须等于应用 slug；remote 的地址与版本不在清单里声明：托管应用取部署记录，linked 应用读其 /remote-module-config.json
  * - labelI18n（可选）：子应用声明自己在各语言下的名称，如 { "zh-CN": "订单", "en-US": "Orders" }；应用中心与租户可覆盖
  */
 
@@ -30,10 +30,10 @@ const normalizePath = value => {
 
 /**
  * @param {unknown} raw 子应用返回的 manifest 原文
- * @param {{ appName: string, kind?: 'managed'|'linked' }} context
+ * @param {{ appName: string }} context
  * @returns {{ ok: boolean, manifest: object|null, errors: string[] }}
  */
-const normalizeMenuManifest = (raw, { appName, kind = 'managed' } = {}) => {
+const normalizeMenuManifest = (raw, { appName } = {}) => {
   const errors = [];
   if (!isPlainObject(raw)) {
     return { ok: false, manifest: null, errors: ['manifest 必须是对象'] };
@@ -62,22 +62,6 @@ const normalizeMenuManifest = (raw, { appName, kind = 'managed' } = {}) => {
       name,
       preset: text(raw.remote?.preset) || DEFAULT_PRESET
     };
-    if (kind === 'linked') {
-      const url = text(raw.remote?.url).replace(/\/+$/, '');
-      if (!/^https?:\/\//i.test(url)) {
-        errors.push('linked 应用的 remote.url 必须是 http(s) 绝对地址');
-      }
-      remote.url = url;
-      // 关联应用没有部署版本记录：联邦容器名带版本后缀（{name}_{version}），宿主据此拼容器名，必须声明与构建一致的版本
-      const version = text(raw.remote?.version);
-      if (!version) {
-        errors.push('linked 应用必须提供 remote.version（与构建时 package.json 的 version 一致，用于定位联邦容器名）');
-      } else if (!/^[A-Za-z0-9._+-]+$/.test(version)) {
-        errors.push('remote.version 只能包含字母、数字与 . _ + -');
-      } else {
-        remote.version = version;
-      }
-    }
   }
 
   let labelI18n = {};
