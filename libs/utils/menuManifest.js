@@ -180,10 +180,30 @@ const flattenLeafMenus = menus => {
   return output;
 };
 
+/**
+ * 关联应用（linked）的菜单图标多为相对路径（如 menu-icons/workspace.svg），宿主前端会按应用 baseUrl 解析，
+ * 跨域取图会被 CORS 拦截。改写成网关路径 `${prefix}/${icon}`（即 /app/{name}/...），同源访问，由网关转发到子应用。
+ * 绝对地址（http(s)、data:）、以 / 开头的路径与不含目录的值（如文件 id）保持不变。
+ */
+const isRelativeIconPath = icon => typeof icon === 'string' && icon.includes('/') && !/^([a-z][a-z0-9+.-]*:|\/)/i.test(icon);
+
+const proxyMenuIcons = (menus, prefix) =>
+  (Array.isArray(menus) ? menus : []).map(menu => {
+    const next = Object.assign({}, menu);
+    if (isRelativeIconPath(menu.icon)) {
+      next.icon = `${prefix}/${menu.icon}`;
+    }
+    if (Array.isArray(menu.children)) {
+      next.children = proxyMenuIcons(menu.children, prefix);
+    }
+    return next;
+  });
+
 module.exports = {
   MANIFEST_SCHEMA_VERSION,
   INTEGRATIONS,
   DEFAULT_PRESET,
   normalizeMenuManifest,
-  flattenLeafMenus
+  flattenLeafMenus,
+  proxyMenuIcons
 };
